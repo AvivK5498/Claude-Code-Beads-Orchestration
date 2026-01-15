@@ -106,9 +106,11 @@ If external directory doesn't have a matching specialist:
 
 ---
 
-## Step 3: Inject Beads Workflow
+## Step 3: Inject Beads Workflow (and UI Constraints for Frontend)
 
 **For every implementation agent, inject beads workflow at the BEGINNING after frontmatter and intro.**
+
+**For frontend agents (react, vue, svelte, angular, nextjs), ALSO inject UI constraints.**
 
 ### Injection Format
 
@@ -132,10 +134,16 @@ You MUST abide by the following workflow:
 
 ---
 
+[FOR FRONTEND SUPERVISORS ONLY - INSERT CONTENTS OF .claude/ui-constraints.md HERE]
+
+---
+
 ## [Rest of external agent's specialty content goes here]
 ```
 
 **CRITICAL:** You MUST read the actual `.claude/beads-workflow-injection.md` file and insert its contents. Do NOT use any hardcoded workflow - the file contains the current workflow including code review requirements.
+
+**FOR FRONTEND SUPERVISORS:** Also read `.claude/ui-constraints.md` and insert after the beads workflow. Frontend supervisors include: react-supervisor, vue-supervisor, svelte-supervisor, angular-supervisor, nextjs-supervisor.
 
 ### CRITICAL: Naming Convention
 
@@ -176,9 +184,14 @@ The filename and `name:` in YAML frontmatter MUST match and end in `-supervisor`
 
 For each specialist:
 
-1. **Read beads workflow snippet:**
+1. **Read required files:**
    ```
    Read(file_path=".claude/beads-workflow-injection.md")
+   ```
+
+   **For frontend supervisors, also read:**
+   ```
+   Read(file_path=".claude/ui-constraints.md")
    ```
 
 2. **Construct complete agent:**
@@ -187,6 +200,8 @@ For each specialist:
    - "You MUST abide by the following workflow:"
    - Beads workflow snippet
    - Separator `---`
+   - **[Frontend only]** UI constraints
+   - **[Frontend only]** Separator `---`
    - External agent's specialty content
 
 3. **Write to project:**
@@ -196,7 +211,7 @@ For each specialist:
 
 4. **Report creation:**
    ```
-   Created [role].md ([Name]) - sourced from external directory
+   Created [role].md ([Name]) - sourced from external directory [+ui-constraints if frontend]
    ```
 
 ---
