@@ -445,11 +445,13 @@ def copy_claude_md(project_dir: Path, project_name: str) -> None:
 # ============================================================================
 
 def setup_gitignore(project_dir: Path) -> None:
-    """Ensure .beads and .claude are in .gitignore."""
+    """Ensure .beads is in .gitignore. .claude/ is tracked (not ignored)."""
     print("\n[6/7] Setting up .gitignore...")
 
     gitignore_path = project_dir / ".gitignore"
-    entries_to_add = [".beads/", ".claude/"]
+    # Only ignore .beads/ (ephemeral task data)
+    # .claude/ is tracked so it survives git operations
+    entries_to_add = [".beads/"]
 
     if gitignore_path.exists():
         content = gitignore_path.read_text()
@@ -469,22 +471,22 @@ def setup_gitignore(project_dir: Path) -> None:
                 # Add newline if file doesn't end with one
                 if content and not content.endswith("\n"):
                     f.write("\n")
-                f.write("\n# Claude Code orchestration\n")
+                f.write("\n# Beads task tracking (ephemeral)\n")
                 for entry in missing:
                     f.write(f"{entry}\n")
                     print(f"  - Added {entry} to .gitignore")
         else:
-            print("  - .beads/ and .claude/ already in .gitignore")
+            print("  - .beads/ already in .gitignore")
     else:
         # Create new .gitignore
-        content = """# Claude Code orchestration
+        content = """# Beads task tracking (ephemeral)
 .beads/
-.claude/
 """
         gitignore_path.write_text(content)
-        print("  - Created .gitignore with .beads/ and .claude/")
+        print("  - Created .gitignore with .beads/")
 
     print("  DONE: .gitignore configured")
+    print("  NOTE: .claude/ is tracked (not ignored) to prevent accidental loss")
 
 
 # ============================================================================
