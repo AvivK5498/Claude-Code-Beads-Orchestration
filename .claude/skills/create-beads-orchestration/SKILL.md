@@ -37,7 +37,7 @@ You MUST follow ALL 4 steps below in exact order. Missing ANY step is a CATASTRO
 ## Step 1: Get Project Info
 
 <critical-step1>
-**YOU MUST ASK ALL THREE QUESTIONS BEFORE PROCEEDING TO STEP 2.**
+**YOU MUST ASK ALL THREE QUESTIONS BEFORE PROCEEDING TO STEP 2 using AskUserQuestion.**
 
 1. **Project directory**: Where to install (default: current working directory)
 2. **Project name**: For agent templates (will auto-infer from package.json/pyproject.toml if not provided)
