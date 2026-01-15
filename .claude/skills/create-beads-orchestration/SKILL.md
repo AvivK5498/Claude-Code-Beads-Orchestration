@@ -38,6 +38,25 @@ You MUST follow ALL 4 steps below in exact order. Missing ANY step is a CATASTRO
 Ask the user for:
 - **Project directory**: Where to install (default: current working directory)
 - **Project name**: For agent templates (will auto-infer from package.json/pyproject.toml if not provided)
+- **Provider delegation**: Use external providers (Codex/Gemini) for read-only agents?
+
+Use AskUserQuestion for the provider delegation choice:
+
+```
+AskUserQuestion(
+  questions=[{
+    "question": "How should read-only agents (scout, detective, architect, scribe, code-reviewer) be executed?",
+    "header": "Providers",
+    "options": [
+      {"label": "Claude only (Recommended)", "description": "All agents run via Claude Task(). Simpler setup, no external dependencies."},
+      {"label": "External providers", "description": "Delegate to Codex CLI (with Gemini fallback). Requires codex login and optional gemini CLI."}
+    ],
+    "multiSelect": false
+  }]
+)
+```
+
+Based on user choice, set `--claude-only` flag for bootstrap (if "Claude only" selected).
 
 Wait for user response before proceeding.
 
@@ -50,6 +69,13 @@ git clone --depth=1 https://github.com/AvivK5498/Claude-Code-Beads-Orchestration
 ```
 
 ```bash
+# If user selected "Claude only":
+python3 "${TMPDIR:-/tmp}/beads-orchestration-setup/bootstrap.py" \
+  --project-name "{{PROJECT_NAME}}" \
+  --project-dir "{{PROJECT_DIR}}" \
+  --claude-only
+
+# If user selected "External providers":
 python3 "${TMPDIR:-/tmp}/beads-orchestration-setup/bootstrap.py" \
   --project-name "{{PROJECT_NAME}}" \
   --project-dir "{{PROJECT_DIR}}"
@@ -138,18 +164,28 @@ rm -rf "${TMPDIR:-/tmp}/beads-orchestration-setup"
 ## What This Creates
 
 - **Beads CLI** for git-native task tracking (one bead = one branch = one task)
-- **Core agents**: scout, detective, architect, scribe, code-reviewer (run via provider delegator)
+- **Core agents**: scout, detective, architect, scribe, code-reviewer
 - **Discovery agent**: Auto-detects tech stack and creates specialized supervisors
-- **MCP Provider Delegator**: Enables read-only agent delegation with Codex→Gemini fallback
-- **7 hooks**: Enforce orchestrator discipline, code review gates, concise responses
+- **Hooks**: Enforce orchestrator discipline, code review gates, concise responses
 - **Branch-per-task workflow**: Parallel development with automated merge conflict handling
+
+**With `--claude-only` (default):**
+- All agents run via Claude Task() - no external dependencies
+
+**With external providers:**
+- MCP Provider Delegator enables Codex→Gemini→Claude fallback chain
+- Additional enforcement hooks for provider delegation
 
 ## Requirements
 
+**Claude only mode (default):**
+- **beads CLI**: Installed automatically (or manually via brew/npm/go)
+- **uv**: Python package manager (only if using external providers)
+
+**External providers mode:**
 - **Codex CLI**: `codex login` for authentication (primary provider)
 - **Gemini CLI**: Optional fallback when Codex hits rate limits
 - **uv**: Python package manager for MCP server
-- **beads CLI**: Installed automatically (or manually via brew/npm/go)
 
 ## More Information
 

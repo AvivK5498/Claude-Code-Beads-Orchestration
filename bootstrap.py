@@ -7,10 +7,14 @@ Creates:
 - .claude/agents/ with agent templates (copied, not generated)
 - .claude/hooks/ with hook scripts
 - .claude/settings.json with hook configuration
-- .mcp.json with provider-delegator configuration
+- .mcp.json with provider-delegator configuration (unless --claude-only)
 
 Usage:
-    python bootstrap.py [--project-name NAME] [--project-dir DIR]
+    python bootstrap.py [--project-name NAME] [--project-dir DIR] [--claude-only]
+
+Modes:
+    Default: Sets up provider_delegator MCP for Codex/Gemini delegation
+    --claude-only: All agents use Claude Task() directly, no external providers
 """
 
 import os
@@ -208,9 +212,10 @@ def setup_provider_delegator() -> Path:
 # BEADS INSTALLATION
 # ============================================================================
 
-def install_beads(project_dir: Path) -> bool:
+def install_beads(project_dir: Path, claude_only: bool = False) -> bool:
     """Install beads CLI and initialize .beads directory."""
-    print("\n[1/6] Installing beads...")
+    step = "[1/6]" if claude_only else "[1/7]"
+    print(f"\n{step} Installing beads...")
 
     beads_dir = project_dir / ".beads"
 
@@ -342,13 +347,14 @@ def _manual_beads_init(beads_dir: Path):
 # AGENTS (TEMPLATE COPYING)
 # ============================================================================
 
-def copy_agents(project_dir: Path, project_name: str) -> list:
+def copy_agents(project_dir: Path, project_name: str, claude_only: bool = False) -> list:
     """Copy core agent templates from templates/ directory.
 
     NOTE: Supervisors are NOT copied here - they are created dynamically
     by the discovery agent based on detected tech stack.
     """
-    print("\n[2/6] Copying core agent templates...")
+    step = "[2/6]" if claude_only else "[2/7]"
+    print(f"\n{step} Copying core agent templates...")
 
     agents_dir = project_dir / ".claude" / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
@@ -385,9 +391,15 @@ def copy_agents(project_dir: Path, project_name: str) -> list:
 # HOOKS (TEMPLATE COPYING)
 # ============================================================================
 
-def copy_hooks(project_dir: Path) -> list:
-    """Copy hook templates from templates/ directory."""
-    print("\n[3/6] Copying hook templates...")
+def copy_hooks(project_dir: Path, claude_only: bool = False) -> list:
+    """Copy hook templates from templates/ directory.
+
+    Args:
+        project_dir: Target project directory
+        claude_only: If True, skip provider delegation enforcement hooks
+    """
+    step = "[3/6]" if claude_only else "[3/7]"
+    print(f"\n{step} Copying hook templates...")
 
     hooks_dir = project_dir / ".claude" / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
@@ -395,7 +407,15 @@ def copy_hooks(project_dir: Path) -> list:
     hooks_template_dir = TEMPLATES_DIR / "hooks"
     copied = []
 
+    # Hooks to skip in claude-only mode (provider delegation enforcement)
+    skip_in_claude_only = {"enforce-codex-delegation.sh"}
+
     for hook_file in hooks_template_dir.glob("*.sh"):
+        # Skip provider enforcement hooks in claude-only mode
+        if claude_only and hook_file.name in skip_in_claude_only:
+            print(f"  - Skipped {hook_file.name} (claude-only mode)")
+            continue
+
         dest = hooks_dir / hook_file.name
         shutil.copy2(hook_file, dest)
         dest.chmod(dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
@@ -410,25 +430,54 @@ def copy_hooks(project_dir: Path) -> list:
 # SETTINGS
 # ============================================================================
 
-def copy_settings(project_dir: Path) -> None:
-    """Copy settings.json template."""
-    print("\n[4/6] Copying settings...")
+def copy_settings(project_dir: Path, claude_only: bool = False) -> None:
+    """Copy settings.json template, optionally removing provider enforcement hooks.
+
+    Args:
+        project_dir: Target project directory
+        claude_only: If True, remove provider delegation enforcement from settings
+    """
+    step = "[4/6]" if claude_only else "[4/7]"
+    print(f"\n{step} Copying settings...")
 
     settings_template = TEMPLATES_DIR / "settings.json"
     settings_dest = project_dir / ".claude" / "settings.json"
 
-    shutil.copy2(settings_template, settings_dest)
-    print("  - Copied settings.json")
-    print("  DONE: settings copied")
+    if claude_only:
+        # Load template, remove provider enforcement hook reference
+        settings = json.loads(settings_template.read_text())
+
+        # Remove enforce-codex-delegation.sh from PreToolUse hooks
+        if "hooks" in settings and "PreToolUse" in settings["hooks"]:
+            for hook_group in settings["hooks"]["PreToolUse"]:
+                if "hooks" in hook_group:
+                    hook_group["hooks"] = [
+                        h for h in hook_group["hooks"]
+                        if "enforce-codex-delegation.sh" not in h.get("command", "")
+                    ]
+                    # Remove empty hook groups
+            settings["hooks"]["PreToolUse"] = [
+                hg for hg in settings["hooks"]["PreToolUse"]
+                if hg.get("hooks")
+            ]
+
+        settings_dest.write_text(json.dumps(settings, indent=2))
+        print("  - Created settings.json (claude-only mode, no provider enforcement)")
+    else:
+        shutil.copy2(settings_template, settings_dest)
+        print("  - Copied settings.json")
+
+    print("  DONE: settings configured")
 
 
 # ============================================================================
 # CLAUDE.MD
 # ============================================================================
 
-def copy_claude_md(project_dir: Path, project_name: str) -> None:
+def copy_claude_md(project_dir: Path, project_name: str, claude_only: bool = False) -> None:
     """Copy CLAUDE.md template with project name replacement."""
-    print("\n[5/6] Copying CLAUDE.md...")
+    step = "[5/6]" if claude_only else "[5/7]"
+    print(f"\n{step} Copying CLAUDE.md...")
 
     claude_template = TEMPLATES_DIR / "CLAUDE.md"
     claude_dest = project_dir / "CLAUDE.md"
@@ -444,9 +493,10 @@ def copy_claude_md(project_dir: Path, project_name: str) -> None:
 # GITIGNORE
 # ============================================================================
 
-def setup_gitignore(project_dir: Path) -> None:
+def setup_gitignore(project_dir: Path, claude_only: bool = False) -> None:
     """Ensure .beads is in .gitignore. .claude/ is tracked (not ignored)."""
-    print("\n[6/7] Setting up .gitignore...")
+    step = "[6/6]" if claude_only else "[6/7]"
+    print(f"\n{step} Setting up .gitignore...")
 
     gitignore_path = project_dir / ".gitignore"
     # Only ignore .beads/ (ephemeral task data) and .mcp.json (user-specific paths)
@@ -540,17 +590,20 @@ def create_mcp_config(project_dir: Path, venv_python: Path) -> None:
 # VERIFICATION
 # ============================================================================
 
-def verify_installation(project_dir: Path) -> bool:
+def verify_installation(project_dir: Path, claude_only: bool = False) -> bool:
     """Verify all components were installed correctly."""
     checks = {
         ".claude/hooks": "Hooks directory",
         ".claude/agents": "Agents directory",
         ".claude/settings.json": "Settings file",
         ".beads": "Beads directory",
-        ".mcp.json": "MCP config",
         "CLAUDE.md": "CLAUDE.md",
         ".gitignore": ".gitignore",
     }
+
+    # Only check for .mcp.json in external providers mode
+    if not claude_only:
+        checks[".mcp.json"] = "MCP config"
 
     print("\n=== Verification ===")
     all_good = True
@@ -587,9 +640,12 @@ def main():
     parser = argparse.ArgumentParser(description="Bootstrap beads-based orchestration")
     parser.add_argument("--project-name", default=None, help="Project name (auto-inferred if not provided)")
     parser.add_argument("--project-dir", default=".", help="Project directory")
+    parser.add_argument("--claude-only", action="store_true",
+                        help="Use Claude Task() for all agents (no external providers)")
     args = parser.parse_args()
 
     project_dir = Path(args.project_dir).resolve()
+    claude_only = args.claude_only
 
     # Ensure project directory exists
     project_dir.mkdir(parents=True, exist_ok=True)
@@ -601,8 +657,10 @@ def main():
         project_name = infer_project_name(project_dir)
         print(f"Auto-inferred project name: {project_name}")
 
+    mode_str = "CLAUDE-ONLY" if claude_only else "EXTERNAL PROVIDERS"
     print(f"\nBootstrapping beads orchestration for: {project_name}")
     print(f"Directory: {project_dir}")
+    print(f"Mode: {mode_str}")
     print("=" * 60)
 
     # Verify templates exist
@@ -611,32 +669,77 @@ def main():
         print("Make sure you cloned the full lean-orchestration repo")
         sys.exit(1)
 
-    # Step 0: Setup bundled provider-delegator
-    venv_python = setup_provider_delegator()
-    if not venv_python:
-        print("\nERROR: Failed to setup provider-delegator. Aborting.")
-        sys.exit(1)
+    venv_python = None
 
-    # Run remaining steps
-    if not install_beads(project_dir):
-        print("\nERROR: Beads CLI is required. Aborting bootstrap.")
-        sys.exit(1)
+    # Step 0: Setup bundled provider-delegator (skip in claude-only mode)
+    if not claude_only:
+        venv_python = setup_provider_delegator()
+        if not venv_python:
+            print("\nERROR: Failed to setup provider-delegator. Aborting.")
+            sys.exit(1)
 
-    copy_agents(project_dir, project_name)
-    copy_hooks(project_dir)
-    copy_settings(project_dir)
-    copy_claude_md(project_dir, project_name)
-    setup_gitignore(project_dir)
-    create_mcp_config(project_dir, venv_python)
+        # Run remaining steps with provider support
+        if not install_beads(project_dir, claude_only=False):
+            print("\nERROR: Beads CLI is required. Aborting bootstrap.")
+            sys.exit(1)
+
+        copy_agents(project_dir, project_name, claude_only=False)
+        copy_hooks(project_dir, claude_only=False)
+        copy_settings(project_dir, claude_only=False)
+        copy_claude_md(project_dir, project_name, claude_only=False)
+        setup_gitignore(project_dir, claude_only=False)
+        create_mcp_config(project_dir, venv_python)
+    else:
+        # Claude-only mode: skip provider setup
+        print("\n[0/6] Skipping provider-delegator setup (claude-only mode)")
+
+        if not install_beads(project_dir, claude_only=True):
+            print("\nERROR: Beads CLI is required. Aborting bootstrap.")
+            sys.exit(1)
+
+        copy_agents(project_dir, project_name, claude_only=True)
+        copy_hooks(project_dir, claude_only=True)
+        copy_settings(project_dir, claude_only=True)
+        copy_claude_md(project_dir, project_name, claude_only=True)
+        setup_gitignore(project_dir, claude_only=True)
 
     # Verify
-    if not verify_installation(project_dir):
+    if not verify_installation(project_dir, claude_only):
         print("\nWARNING: Installation incomplete - check errors above")
 
     print("\n" + "=" * 60)
     print("BOOTSTRAP COMPLETE")
     print("=" * 60)
-    print(f"""
+
+    if claude_only:
+        print(f"""
+Mode: CLAUDE-ONLY (all agents use Claude Task)
+
+Next steps:
+
+1. Restart Claude Code to load new hooks and agents
+
+2. **REQUIRED: Run discovery to create supervisors**
+   Discovery will scan your codebase and fetch specialist agents:
+
+   Task(
+       subagent_type="discovery",
+       prompt="Detect tech stack and create supervisors for {project_name}"
+   )
+
+3. Create your first bead:
+   bd create "First task"
+
+4. Dispatch work to supervisors:
+   Task(subagent_type="<supervisor-name>", prompt="BEAD_ID: BD-001\\n\\nImplement...")
+
+NOTE: All agents (scout, detective, architect, etc.) run via Claude Task().
+No external providers (Codex/Gemini) are configured.
+""")
+    else:
+        print(f"""
+Mode: EXTERNAL PROVIDERS (Codex → Gemini → Claude fallback)
+
 Next steps:
 
 1. Restart Claude Code to load new hooks and agents
@@ -661,8 +764,10 @@ Next steps:
 4. Dispatch work to supervisors:
    Task(subagent_type="<supervisor-name>", prompt="BEAD_ID: BD-001\\n\\nImplement...")
 
-NOTE: Supervisors are sourced from https://github.com/ayush-that/sub-agents.directory
-with beads workflow injected. No local supervisor templates are used.
+NOTE: Read-only agents (scout, detective, architect, scribe, code-reviewer)
+are delegated via provider_delegator MCP (Codex → Gemini fallback).
+Supervisors are sourced from https://github.com/ayush-that/sub-agents.directory
+with beads workflow injected.
 """)
 
 

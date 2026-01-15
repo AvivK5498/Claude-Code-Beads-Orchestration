@@ -2,18 +2,33 @@
 
 A lightweight multi-agent orchestration framework for Claude Code that enables parallel development workflows with mandatory code review gates.
 
+## Two Modes of Operation
+
+Beads Orchestration supports two modes for running read-only agents (scout, detective, architect, scribe, code-reviewer):
+
+| Mode | Flag | Read-only Agents | Requirements |
+|------|------|------------------|--------------|
+| **Claude-only** | `--claude-only` | Run via Claude Task() | beads CLI only |
+| **External Providers** | (default) | Run via Codex/Gemini | Codex CLI, Gemini CLI, uv |
+
+**Claude-only mode** is simpler to set up and has no external dependencies. **External providers mode** offloads read-only work to Codex/Gemini, reducing Claude token usage.
+
 ## Requirements
 
-Before getting started, ensure you have:
+### Claude-only Mode (Recommended for simplicity)
 
 - **Claude Code** with hooks support
-- **Codex CLI** - Run `codex login` to authenticate (primary provider)
-- **Gemini CLI** - Optional fallback when Codex hits rate limits
-- **uv** - Python package manager ([install](https://github.com/astral-sh/uv))
 - **beads CLI** - Installed automatically by the skill, or manually:
   - macOS: `brew install steveyegge/beads/bd`
   - npm: `npm install -g @beads/bd`
   - Go: `go install github.com/steveyegge/beads/cmd/bd@latest`
+
+### External Providers Mode (For reduced Claude usage)
+
+All of the above, plus:
+- **Codex CLI** - Run `codex login` to authenticate (primary provider)
+- **Gemini CLI** - Optional fallback when Codex hits rate limits
+- **uv** - Python package manager ([install](https://github.com/astral-sh/uv))
 
 ## Getting Started
 
@@ -63,6 +78,36 @@ Beads Orchestration turns a single Claude Code session into a coordinated team o
 
 ## Architecture
 
+### Claude-only Mode
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         ORCHESTRATOR                            │
+│  (Main Claude session - delegates only, blocked from coding)    │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+           ┌───────────────┼───────────────┐
+           │               │               │
+           ▼               ▼               ▼
+    ┌──────────┐    ┌──────────┐    ┌──────────┐
+    │   Task   │    │   Task   │    │   Task   │
+    │ Subagent │    │ Subagent │    │ Subagent │
+    └────┬─────┘    └────┬─────┘    └────┬─────┘
+         │               │               │
+    Read-only:      Implements      Implements
+    - scout         on branch:      on branch:
+    - detective     bd-BD-001       bd-BD-002
+    - architect         │               │
+    - scribe            └───────┬───────┘
+    - code-reviewer             │
+                          Code Review
+                          (Required)
+```
+
+All agents run via Claude Task() - simple and no external dependencies.
+
+### External Providers Mode
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                         ORCHESTRATOR                            │
@@ -77,7 +122,7 @@ Beads Orchestration turns a single Claude Code session into a coordinated team o
     │ Delegator│    │ Subagent │    │ Subagent │
     └────┬─────┘    └────┬─────┘    └────┬─────┘
          │               │               │
-    Read-only       Implements      Implements
+    Codex/Gemini    Implements      Implements
     agents:         on branch:      on branch:
     - scout         bd-BD-001       bd-BD-002
     - detective         │               │
@@ -87,7 +132,33 @@ Beads Orchestration turns a single Claude Code session into a coordinated team o
                           (Required)
 ```
 
+Read-only agents run on Codex (primary) with Gemini fallback, reducing Claude token usage.
+
 ## What Gets Installed
+
+### Claude-only Mode
+
+```
+your-project/
+├── .beads/                           # Git-native task tracking
+├── .claude/
+│   ├── agents/
+│   │   ├── scout.md                  # Codebase exploration (Task)
+│   │   ├── detective.md              # Bug investigation (Task)
+│   │   ├── architect.md              # Design & planning (Task)
+│   │   ├── scribe.md                 # Documentation (Task)
+│   │   ├── code-reviewer.md          # Code review gate (Task)
+│   │   ├── discovery.md              # Tech detection (Task)
+│   │   ├── worker-supervisor.md      # Small tasks (Task)
+│   │   └── merge-supervisor.md       # Conflict resolution (Task)
+│   ├── hooks/                        # 7 enforcement hooks
+│   ├── beads-workflow-injection.md   # Workflow injected into supervisors
+│   └── settings.json                 # Hook configuration
+├── CLAUDE.md                         # Orchestrator instructions
+└── .gitignore                        # Excludes .beads/
+```
+
+### External Providers Mode
 
 ```
 your-project/
@@ -103,11 +174,11 @@ your-project/
 │   │   ├── discovery.md              # Tech detection (Task)
 │   │   ├── worker-supervisor.md      # Small tasks (Task)
 │   │   └── merge-supervisor.md       # Conflict resolution (Task)
-│   ├── hooks/                        # 7 enforcement hooks
+│   ├── hooks/                        # 8 enforcement hooks (includes enforce-codex-delegation.sh)
 │   ├── beads-workflow-injection.md   # Workflow injected into supervisors
 │   └── settings.json                 # Hook configuration
 ├── CLAUDE.md                         # Orchestrator instructions
-└── .gitignore                        # Excludes .beads/ and .claude/
+└── .gitignore                        # Excludes .beads/ and .mcp.json
 ```
 
 Tech-specific supervisors (e.g., `react-supervisor`, `python-backend-supervisor`) are created dynamically by the discovery agent based on your codebase.
@@ -129,21 +200,40 @@ bd close BD-001                      # Close completed bead
 
 ### Agent Types
 
-| Agent | Runs On | Purpose | Can Write Code? |
-|-------|---------|---------|-----------------|
-| scout | Codex | Find files, explore structure | No |
-| detective | Codex | Investigate bugs, trace issues | No |
-| architect | Codex | Design solutions, plan approach | No |
-| scribe | Codex | Write documentation | No |
-| code-reviewer | Codex | Review code, approve completion | No |
-| discovery | Task | Detect tech stack, create supervisors | Yes |
-| *-supervisor | Task | Implement features, fix bugs | Yes |
+| Agent | Claude-only | External Providers | Purpose | Can Write Code? |
+|-------|-------------|-------------------|---------|-----------------|
+| scout | Task | Codex | Find files, explore structure | No |
+| detective | Task | Codex | Investigate bugs, trace issues | No |
+| architect | Task | Codex | Design solutions, plan approach | No |
+| scribe | Task | Codex | Write documentation | No |
+| code-reviewer | Task | Codex | Review code, approve completion | No |
+| discovery | Task | Task | Detect tech stack, create supervisors | Yes |
+| *-supervisor | Task | Task | Implement features, fix bugs | Yes |
 
 ### Delegation Patterns (Enforced)
 
-The orchestration workflow **enforces** delegation through hooks and subagent configuration. The orchestrator cannot bypass these patterns—they are automatically applied whether using Codex agents or native Claude Code Task subagents.
+The orchestration workflow **enforces** delegation through hooks and subagent configuration. The orchestrator cannot bypass these patterns.
 
-**Read-only tasks → Provider Delegator (enforced):**
+#### Claude-only Mode
+
+**All agents use Task():**
+```python
+# Read-only task
+Task(
+    subagent_type="scout",
+    prompt="Find all authentication-related files"
+)
+
+# Implementation task
+Task(
+    subagent_type="react-supervisor",
+    prompt="BEAD_ID: BD-001\n\nImplement login component with form validation"
+)
+```
+
+#### External Providers Mode
+
+**Read-only tasks → Provider Delegator (enforced by hook):**
 ```python
 mcp__provider_delegator__invoke_agent(
     agent="scout",
@@ -151,7 +241,7 @@ mcp__provider_delegator__invoke_agent(
 )
 ```
 
-**Implementation tasks → Task Subagents (enforced):**
+**Implementation tasks → Task Subagents:**
 ```python
 Task(
     subagent_type="react-supervisor",
@@ -225,7 +315,20 @@ Push to remote when you're ready, after the orchestrator has merged completed wo
 
 **All supervisors must pass code review before completion.**
 
-The code-reviewer agent performs two-phase review:
+### How Code Review Works
+
+The code-reviewer agent always gathers context from the bead first:
+
+```bash
+# Step 0: Gather context (always done first)
+bd show {BEAD_ID}           # Task description
+bd comments {BEAD_ID}       # Supervisor's implementation notes
+git diff main...bd-{BEAD_ID}  # Actual code changes
+```
+
+This ensures the code-reviewer has full context regardless of how it was invoked (Claude-only or external providers).
+
+### Two-Phase Review
 
 1. **Phase 1: Spec Compliance**
    - Did they implement all requirements?
@@ -246,19 +349,33 @@ The code-reviewer agent performs two-phase review:
 - Reviewer lists issues with `file:line` references
 - Supervisor must fix and request review again
 
+### Mode-Specific Behavior
+
+| Mode | Code Review Invocation |
+|------|----------------------|
+| Claude-only | Orchestrator dispatches via `Task(subagent_type="code-reviewer", prompt="Review BEAD_ID: BD-001")` |
+| External Providers | Supervisor calls `mcp__provider_delegator__invoke_agent(agent="code-reviewer", ...)` |
+
+In both modes, the code-reviewer reads context from the bead, not from the prompt. This ensures consistent reviews.
+
 ## Hooks
 
-| Hook | Lifecycle | Purpose |
-|------|-----------|---------|
-| `block-orchestrator-tools.sh` | PreToolUse | Prevents orchestrator from using Edit/Write/etc. |
-| `enforce-codex-delegation.sh` | PreToolUse (Task) | Forces read-only agents to use Codex |
-| `enforce-bead-for-supervisor.sh` | PreToolUse (Task) | Requires BEAD_ID for supervisors |
-| `remind-inprogress.sh` | PreToolUse (Task) | Warns about in-progress beads |
-| `enforce-concise-response.sh` | PostToolUse (Task) | Limits response verbosity |
-| `validate-completion.sh` | SubagentStop | Blocks completion without code review |
-| `session-start.sh` | SessionStart | Session initialization |
+| Hook | Lifecycle | Mode | Purpose |
+|------|-----------|------|---------|
+| `block-orchestrator-tools.sh` | PreToolUse | Both | Prevents orchestrator from using Edit/Write/etc. |
+| `enforce-codex-delegation.sh` | PreToolUse (Task) | External only | Forces read-only agents to use provider_delegator |
+| `enforce-bead-for-supervisor.sh` | PreToolUse (Task) | Both | Requires BEAD_ID for supervisors |
+| `remind-inprogress.sh` | PreToolUse (Task) | Both | Warns about in-progress beads |
+| `enforce-concise-response.sh` | PostToolUse (Task) | Both | Limits response verbosity |
+| `validate-completion.sh` | SubagentStop | Both | Blocks completion without code review |
+| `session-start.sh` | SessionStart | Both | Session initialization |
+| `clarify-vague-request.sh` | UserPromptSubmit | Both | Prompts for clarification on vague requests |
 
-## MCP Provider Delegator
+**Note:** In Claude-only mode, `enforce-codex-delegation.sh` is not installed since all agents use Task() directly.
+
+## MCP Provider Delegator (External Providers Mode Only)
+
+> **Note:** This section only applies to External Providers mode. In Claude-only mode, the provider_delegator is not installed and all agents use Task() directly.
 
 The `provider_delegator` MCP server runs read-only agents with automatic fallback:
 
@@ -277,13 +394,24 @@ The `provider_delegator` MCP server runs read-only agents with automatic fallbac
 │  1. Load agent template (.md file)      │
 │  2. Try Codex (primary)                 │
 │  3. If rate limited → Try Gemini        │
-│  4. If both fail → Skip (code-reviewer) │
+│  4. If both fail → Return fallback hint │
 └─────────────────────────────────────────┘
 ```
 
-**Fallback Chain:** Codex → Gemini → Skip (code-reviewer only)
+**Fallback Chain:** Codex → Gemini → Claude Task (with fallback hint)
 
 **Supported Agents:** scout, detective, architect, scribe, code-reviewer
+
+**Fallback Scenarios:**
+| Situation | Behavior |
+|-----------|----------|
+| Codex works | Uses Codex |
+| Codex rate limited | Falls back to Gemini |
+| Codex not installed | Falls back to Gemini |
+| Both rate limited | Returns Claude Task() fallback hint |
+| Both not installed | Returns Claude Task() fallback hint |
+
+The delegator gracefully handles missing CLIs - if Codex isn't installed but Gemini is, it automatically uses Gemini.
 
 ## Discovery Agent
 
@@ -310,14 +438,35 @@ If you prefer not to use the skill, you can run the bootstrap script directly:
 
 ```bash
 git clone --depth=1 https://github.com/AvivK5498/Claude-Code-Beads-Orchestration "${TMPDIR:-/tmp}/beads-orchestration"
+```
 
+### Claude-only Mode (Recommended)
+
+```bash
+python3 "${TMPDIR:-/tmp}/beads-orchestration/bootstrap.py" \
+  --project-name "MyProject" \
+  --project-dir /path/to/your/project \
+  --claude-only
+```
+
+### External Providers Mode
+
+```bash
 python3 "${TMPDIR:-/tmp}/beads-orchestration/bootstrap.py" \
   --project-name "MyProject" \
   --project-dir /path/to/your/project
 ```
 
+### Bootstrap Options
+
+| Flag | Description |
+|------|-------------|
+| `--project-name` | Project name for agent templates (auto-inferred if not provided) |
+| `--project-dir` | Target project directory (default: current directory) |
+| `--claude-only` | Use Claude Task() for all agents, no external providers |
+
 After bootstrap completes:
-1. Restart Claude Code to load hooks and MCP configuration
+1. Restart Claude Code to load hooks and configuration
 2. Run the discovery agent to create tech-specific supervisors
 
 ---

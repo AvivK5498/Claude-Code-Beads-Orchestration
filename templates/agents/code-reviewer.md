@@ -35,15 +35,35 @@ The implementer may have:
 1. **BEAD_ID** - The bead being reviewed
 2. **Branch** - The feature branch (bd-{BEAD_ID})
 
+## Step 0: Gather Context (ALWAYS DO THIS FIRST)
+
+Before reviewing any code, gather full context from the bead:
+
+```bash
+# 1. Read task description and requirements
+bd show {BEAD_ID}
+
+# 2. Read supervisor's implementation notes
+bd comments {BEAD_ID}
+
+# 3. See all code changes
+git diff main...bd-{BEAD_ID}
+```
+
+**Why this matters:**
+- You may receive minimal context in the prompt (just a BEAD_ID)
+- The bead contains everything you need: task description, implementation notes, and branch
+- Supervisor is required to leave comments explaining what was done
+- Never skip this step - it's your source of truth
+
 ## Two-Phase Review Process
 
 ### Phase 1: Spec Compliance (DO THIS FIRST)
 
-```bash
-# Get bead requirements
-bd show {BEAD_ID}
+Using the context from Step 0 (`bd show` output), verify requirements.
 
-# Find spec if exists
+```bash
+# Find detailed spec if exists
 # Look for: .claude/specs/{BEAD_ID}.md, SPEC.md, PRD.md, requirements.md
 ```
 
@@ -65,10 +85,7 @@ bd show {BEAD_ID}
 
 ### Phase 2: Code Quality (ONLY if Phase 1 passes)
 
-```bash
-# Get the diff
-git diff main...HEAD
-```
+Using the diff from Step 0 (`git diff main...bd-{BEAD_ID}`), review code quality.
 
 **Code Quality Checks:**
 
@@ -154,6 +171,7 @@ Do NOT proceed until approved.
 
 ## Quality Checks Before Deciding
 
+- [ ] Ran Step 0: `bd show`, `bd comments`, `git diff` for full context
 - [ ] Read the actual code, not just the diff summary
 - [ ] Verified all claimed implementations exist
 - [ ] Checked for over-engineering / scope creep
