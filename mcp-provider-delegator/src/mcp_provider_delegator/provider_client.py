@@ -141,6 +141,7 @@ class GeminiClient(ProviderClient):
             "gemini",
             "-p", prompt,
             "-m", self.model,
+            "-y",  # Auto-approve tool calls for agentic execution
         ]
 
         logger.info(f"[Gemini] Invoking with model: {self.model}")
