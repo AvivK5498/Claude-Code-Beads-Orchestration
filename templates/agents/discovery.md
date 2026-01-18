@@ -114,14 +114,15 @@ If external directory doesn't have a matching specialist:
 
 ### Injection Format
 
-**CRITICAL: Do NOT include a `tools:` section in the frontmatter.**
-Omitting the tools section allows the supervisor to inherit ALL available tools from the parent session, including MCP tools like `mcp__provider_delegator__invoke_agent`.
+**CRITICAL: Always include `tools: *` in the frontmatter.**
+This grants supervisors access to ALL available tools including MCP tools and Skills.
 
 ```markdown
 ---
 name: [agent-name]
 description: [from external agent]
 model: sonnet
+tools: *
 ---
 
 # [Role]: "[Name]"
@@ -138,6 +139,10 @@ You MUST abide by the following workflow:
 
 ---
 
+[FOR FRONTEND SUPERVISORS ONLY - INSERT CONTENTS OF .claude/frontend-reviews-requirement.md HERE]
+
+---
+
 [FOR REACT/NEXT.JS SUPERVISORS ONLY - INSERT REACT BEST PRACTICES REQUIREMENT]
 
 ---
@@ -147,9 +152,9 @@ You MUST abide by the following workflow:
 
 **CRITICAL:** You MUST read the actual `.claude/beads-workflow-injection.md` file and insert its contents. Do NOT use any hardcoded workflow - the file contains the current workflow including code review requirements.
 
-**FOR FRONTEND SUPERVISORS:** Also read `.claude/ui-constraints.md` and insert after the beads workflow. Frontend supervisors include: react-supervisor, vue-supervisor, svelte-supervisor, angular-supervisor, nextjs-supervisor.
+**FOR FRONTEND SUPERVISORS:** Also read `.claude/ui-constraints.md` AND `.claude/frontend-reviews-requirement.md` and insert both after the beads workflow. Frontend supervisors include: react-supervisor, vue-supervisor, svelte-supervisor, angular-supervisor, nextjs-supervisor.
 
-**FOR REACT/NEXT.JS SUPERVISORS ONLY:** After UI constraints, add this mandatory skill requirement:
+**FOR REACT/NEXT.JS SUPERVISORS ONLY:** After RAMS requirement, add this mandatory skill requirement:
 
 ```markdown
 ## Mandatory: React Best Practices Skill
@@ -262,6 +267,7 @@ For each specialist:
    **For frontend supervisors, also read:**
    ```
    Read(file_path=".claude/ui-constraints.md")
+   Read(file_path=".claude/frontend-reviews-requirement.md")
    ```
 
 2. **Construct complete agent:**
@@ -272,6 +278,10 @@ For each specialist:
    - Separator `---`
    - **[Frontend only]** UI constraints
    - **[Frontend only]** Separator `---`
+   - **[Frontend only]** Frontend reviews requirement (RAMS + Web Interface Guidelines)
+   - **[Frontend only]** Separator `---`
+   - **[React/Next.js only]** React best practices skill requirement
+   - **[React/Next.js only]** Separator `---`
    - External agent's specialty content
 
 3. **Write to project:**
@@ -281,8 +291,23 @@ For each specialist:
 
 4. **Report creation:**
    ```
-   Created [role].md ([Name]) - sourced from external directory [+ui-constraints if frontend]
+   Created [role].md ([Name]) - sourced from external directory [+ui-constraints +rams if frontend]
    ```
+
+5. **Register frontend supervisors for review enforcement:**
+
+   **For each frontend supervisor created**, append its name to the frontend supervisors config:
+   ```bash
+   echo "[supervisor-name]" >> .claude/frontend-supervisors.txt
+   ```
+
+   Example: If you create `react-supervisor` and `vue-supervisor`:
+   ```bash
+   echo "react-supervisor" >> .claude/frontend-supervisors.txt
+   echo "vue-supervisor" >> .claude/frontend-supervisors.txt
+   ```
+
+   This registers them with the frontend reviews hook. Supervisors in this file must run both RAMS and Web Interface Guidelines reviews before completing.
 
 ---
 
@@ -324,6 +349,10 @@ SUPERVISORS_CREATED:
   [role].md ([Name]) - [technology] - sourced from external directory
 
 BEADS_WORKFLOW_INJECTED: Yes (all implementation agents)
+
+FRONTEND_REVIEWS_ENFORCEMENT:
+  - Registered supervisors: [list of frontend supervisors in .claude/frontend-supervisors.txt]
+  - Required reviews: RAMS (accessibility) + Web Interface Guidelines (design)
 
 SKILLS_INSTALLED:
   - react-best-practices: [Yes/No/N/A] (React/Next.js projects only)
@@ -369,5 +398,7 @@ Before reporting:
 - [ ] Agent files have correct YAML frontmatter
 - [ ] Names assigned from suggested list
 - [ ] CLAUDE.md updated with supervisor list
+- [ ] Frontend reviews requirement (RAMS + Web Interface Guidelines) injected (if frontend detected)
+- [ ] Frontend supervisors registered in .claude/frontend-supervisors.txt
 - [ ] React best practices skill installed (if React/Next.js detected)
 - [ ] React supervisor has mandatory skill requirement (if React/Next.js detected)

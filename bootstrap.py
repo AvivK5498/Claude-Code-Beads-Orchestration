@@ -344,6 +344,76 @@ def _manual_beads_init(beads_dir: Path):
 
 
 # ============================================================================
+# RAMS INSTALLATION (Accessibility Review)
+# ============================================================================
+
+def install_rams() -> bool:
+    """Install RAMS accessibility review tool if not already installed."""
+    print("\n  Checking RAMS (accessibility review tool)...")
+
+    # Check if rams is already installed
+    if shutil.which("rams"):
+        print("  - RAMS already installed")
+        return True
+
+    print("  - RAMS not found, installing...")
+
+    # Install via curl
+    if sys.platform != "win32":
+        result = subprocess.run(
+            ["bash", "-c", "curl -fsSL https://rams.ai/install | bash"],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            print("  - RAMS installed successfully")
+            return True
+        else:
+            print(f"  - Warning: Could not install RAMS: {result.stderr}")
+            print("  - Frontend supervisors will still work but RAMS review enforcement may fail")
+            print("  - Install manually: curl -fsSL https://rams.ai/install | bash")
+            return False
+
+    print("  - Warning: RAMS installation not supported on Windows")
+    return False
+
+
+# ============================================================================
+# WEB INTERFACE GUIDELINES INSTALLATION
+# ============================================================================
+
+def install_web_interface_guidelines() -> bool:
+    """Install Web Interface Guidelines review tool if not already installed."""
+    print("\n  Checking Web Interface Guidelines (design review tool)...")
+
+    # Check if wig is already installed
+    if shutil.which("wig"):
+        print("  - Web Interface Guidelines already installed")
+        return True
+
+    print("  - Web Interface Guidelines not found, installing...")
+
+    # Install via curl
+    if sys.platform != "win32":
+        result = subprocess.run(
+            ["bash", "-c", "curl -fsSL https://vercel.com/design/guidelines/install | bash"],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            print("  - Web Interface Guidelines installed successfully")
+            return True
+        else:
+            print(f"  - Warning: Could not install Web Interface Guidelines: {result.stderr}")
+            print("  - Frontend supervisors will still work but WIG review enforcement may fail")
+            print("  - Install manually: curl -fsSL https://vercel.com/design/guidelines/install | bash")
+            return False
+
+    print("  - Warning: Web Interface Guidelines installation not supported on Windows")
+    return False
+
+
+# ============================================================================
 # AGENTS (TEMPLATE COPYING)
 # ============================================================================
 
@@ -381,6 +451,20 @@ def copy_agents(project_dir: Path, project_name: str, claude_only: bool = False)
     if beads_workflow_src.exists():
         shutil.copy2(beads_workflow_src, beads_workflow_dest)
         print("  - Copied beads-workflow-injection.md")
+
+    # Copy UI constraints (used by discovery agent for frontend supervisors)
+    ui_constraints_src = TEMPLATES_DIR / "ui-constraints.md"
+    ui_constraints_dest = project_dir / ".claude" / "ui-constraints.md"
+    if ui_constraints_src.exists():
+        shutil.copy2(ui_constraints_src, ui_constraints_dest)
+        print("  - Copied ui-constraints.md")
+
+    # Copy frontend reviews requirement (RAMS + Web Interface Guidelines)
+    frontend_reviews_src = TEMPLATES_DIR / "frontend-reviews-requirement.md"
+    frontend_reviews_dest = project_dir / ".claude" / "frontend-reviews-requirement.md"
+    if frontend_reviews_src.exists():
+        shutil.copy2(frontend_reviews_src, frontend_reviews_dest)
+        print("  - Copied frontend-reviews-requirement.md")
 
     print(f"  DONE: {len(copied)} core agents copied")
     print("  NOTE: Supervisors will be created by discovery agent based on tech stack")
@@ -724,6 +808,10 @@ def main():
             print("\nERROR: Beads CLI is required. Aborting bootstrap.")
             sys.exit(1)
 
+        # Install frontend review tools (optional, won't block)
+        install_rams()
+        install_web_interface_guidelines()
+
         copy_agents(project_dir, project_name, claude_only=False)
         copy_skills(project_dir, claude_only=False)
         copy_hooks(project_dir, claude_only=False)
@@ -738,6 +826,10 @@ def main():
         if not install_beads(project_dir, claude_only=True):
             print("\nERROR: Beads CLI is required. Aborting bootstrap.")
             sys.exit(1)
+
+        # Install frontend review tools (optional, won't block)
+        install_rams()
+        install_web_interface_guidelines()
 
         copy_agents(project_dir, project_name, claude_only=True)
         copy_skills(project_dir, claude_only=True)
