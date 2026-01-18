@@ -22,6 +22,9 @@ Beads Orchestration supports two modes for running read-only agents (scout, dete
   - macOS: `brew install steveyegge/beads/bd`
   - npm: `npm install -g @beads/bd`
   - Go: `go install github.com/steveyegge/beads/cmd/bd@latest`
+- **For frontend projects** (optional, installed by bootstrap):
+  - **RAMS** - Accessibility review skill (Claude Code built-in)
+  - **Web Interface Guidelines** - `curl -fsSL https://vercel.com/design/guidelines/install | bash`
 
 ### External Providers Mode (For reduced Claude usage)
 
@@ -151,8 +154,10 @@ your-project/
 │   │   ├── discovery.md              # Tech detection (Task)
 │   │   ├── worker-supervisor.md      # Small tasks (Task)
 │   │   └── merge-supervisor.md       # Conflict resolution (Task)
-│   ├── hooks/                        # 7 enforcement hooks
+│   ├── hooks/                        # 8 enforcement hooks
 │   ├── beads-workflow-injection.md   # Workflow injected into supervisors
+│   ├── frontend-reviews-requirement.md  # RAMS + WIG requirements for frontend
+│   ├── frontend-supervisors.txt      # List of frontend supervisors (populated by discovery)
 │   └── settings.json                 # Hook configuration
 ├── CLAUDE.md                         # Orchestrator instructions
 └── .gitignore                        # Excludes .beads/
@@ -174,8 +179,10 @@ your-project/
 │   │   ├── discovery.md              # Tech detection (Task)
 │   │   ├── worker-supervisor.md      # Small tasks (Task)
 │   │   └── merge-supervisor.md       # Conflict resolution (Task)
-│   ├── hooks/                        # 8 enforcement hooks (includes enforce-codex-delegation.sh)
+│   ├── hooks/                        # 9 enforcement hooks (includes enforce-codex-delegation.sh)
 │   ├── beads-workflow-injection.md   # Workflow injected into supervisors
+│   ├── frontend-reviews-requirement.md  # RAMS + WIG requirements for frontend
+│   ├── frontend-supervisors.txt      # List of frontend supervisors (populated by discovery)
 │   └── settings.json                 # Hook configuration
 ├── CLAUDE.md                         # Orchestrator instructions
 └── .gitignore                        # Excludes .beads/ and .mcp.json
@@ -358,6 +365,55 @@ This ensures the code-reviewer has full context regardless of how it was invoked
 
 In both modes, the code-reviewer reads context from the bead, not from the prompt. This ensures consistent reviews.
 
+## Frontend Reviews (RAMS + Web Interface Guidelines)
+
+Frontend supervisors have additional mandatory review requirements beyond code review.
+
+### Required Reviews
+
+| Review | Skill | Purpose |
+|--------|-------|---------|
+| **RAMS** | `/rams` | Accessibility audit (WCAG 2.1 compliance) |
+| **Web Interface Guidelines** | `/web-interface-guidelines` | Vercel design pattern compliance |
+
+### How It Works
+
+1. **Discovery agent** identifies frontend supervisors and registers them in `.claude/frontend-supervisors.txt`
+2. **Frontend supervisors** must run both skills before completing:
+   ```
+   Skill(skill="rams", args="path/to/component.tsx")
+   Skill(skill="web-interface-guidelines")
+   ```
+3. **Document results** on the bead:
+   ```bash
+   bd comment {BEAD_ID} "Reviews: RAMS 95/100, WIG passed"
+   ```
+4. **SubagentStop hook** (`enforce-frontend-reviews.sh`) blocks completion if any requirement is missing
+
+### What RAMS Checks
+
+| Category | Issues Caught |
+|----------|---------------|
+| **Critical** | Missing alt text, buttons without accessible names, inputs without labels |
+| **Serious** | Missing focus outlines, no keyboard handlers, color-only information |
+| **Moderate** | Heading hierarchy issues, positive tabIndex values |
+| **Visual** | Spacing inconsistencies, contrast issues, missing states |
+
+### What WIG Checks
+
+- Vercel Web Interface Guidelines compliance
+- Design system consistency
+- Component patterns and best practices
+- Accessibility anti-patterns (icon buttons without aria-label, inputs without labels)
+
+### Workflow
+
+```
+Implement → Run tests → Run RAMS → Run WIG → Fix issues → Document on bead → Mark inreview
+```
+
+**Note:** The hook checks for actual Skill tool invocations in the transcript, not text output. Supervisors cannot fake compliance.
+
 ## Hooks
 
 | Hook | Lifecycle | Mode | Purpose |
@@ -368,6 +424,7 @@ In both modes, the code-reviewer reads context from the bead, not from the promp
 | `remind-inprogress.sh` | PreToolUse (Task) | Both | Warns about in-progress beads |
 | `enforce-concise-response.sh` | PostToolUse (Task) | Both | Limits response verbosity |
 | `validate-completion.sh` | SubagentStop | Both | Blocks completion without code review |
+| `enforce-frontend-reviews.sh` | SubagentStop | Both | Requires RAMS + WIG reviews for frontend supervisors |
 | `session-start.sh` | SessionStart | Both | Session initialization |
 | `clarify-vague-request.sh` | UserPromptSubmit | Both | Prompts for clarification on vague requests |
 
@@ -429,6 +486,15 @@ The discovery agent scans your codebase and creates appropriate supervisors:
 | pubspec.yaml | flutter-supervisor |
 
 Supervisors are sourced from [sub-agents.directory](https://github.com/ayush-that/sub-agents.directory) with the beads workflow injected.
+
+### Frontend Supervisor Registration
+
+When the discovery agent creates frontend supervisors (React, Vue, etc.), it:
+1. Registers the supervisor name in `.claude/frontend-supervisors.txt`
+2. Injects the frontend reviews requirement into the supervisor prompt
+3. Grants `tools: *` access so the supervisor can invoke RAMS and WIG skills
+
+This enables the `enforce-frontend-reviews.sh` hook to target the correct supervisors dynamically.
 
 ---
 
