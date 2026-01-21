@@ -92,16 +92,9 @@ Fix: Add router.push('/dashboard') after successful auth"""
 
 ## Epics (Cross-Domain Features)
 
-For features spanning multiple supervisors:
+When a feature spans multiple supervisors (e.g., DB + API + Frontend), the orchestrator automatically creates an epic with child tasks and manages dependencies. Children work on a shared epic branch and are dispatched sequentially.
 
-```bash
-bd create "User profiles" -d "..." --type epic           # Create epic
-bd create "DB schema" -d "..." --parent BD-001           # Child .1
-bd create "API endpoints" -d "..." --parent BD-001 --deps BD-001.1  # Child .2
-bd create "Frontend" -d "..." --parent BD-001 --deps BD-001.2       # Child .3
-```
-
-Children work on a shared epic branch. Orchestrator dispatches sequentially based on dependencies.
+You can also explicitly request an epic: *"Add user profiles and create an epic for it."*
 
 ## What Gets Installed
 
