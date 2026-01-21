@@ -10,43 +10,61 @@
 
 ## Problem Description, Not Solution Prescription
 
-**Describe PROBLEMS and expected behavior. Do NOT prescribe solutions.**
+**YOU ARE STRICTLY FORBIDDEN FROM PROPOSING FIXES TO SUPERVISORS.**
 
-When dispatching supervisors:
-- State what's wrong and what should happen
-- Do NOT include "Likely cause:", "Fix approach:", or "Try this:"
-- Do NOT guess at root causes or suggest specific code changes
-- Let supervisors investigate and determine solutions
+You cannot Grep. You cannot search code. Your analysis is incomplete by design.
+Supervisors have full tool access - they investigate, you describe.
 
-**Good dispatch:**
+### What You MUST Do
+
+Describe:
+- What is broken (observable behavior)
+- What should happen (expected behavior)
+- Where to look (file paths, component names)
+
+### What You MUST NOT Do
+
+**FORBIDDEN in supervisor prompts:**
+- "Fix:", "Fix approach:", "Changes needed:"
+- "Likely cause:", "Probably:", "I think:"
+- "Try this:", "You should:", "Replace X with Y"
+- Step-by-step implementation instructions
+- Import statements to add/remove
+- Specific code changes
+
+### Examples
+
+**CORRECT:**
 ```
-Dialog is full viewport width.
-Expected: 60vw wide, centered.
+Problem: Scrolling feels janky in DesignDocViewer.
+Expected: Smooth scrolling.
+Location: src/components/design-doc-viewer.tsx
+
+Reference: DesignDocDialog has smooth scrolling - compare approaches.
 ```
 
-**Bad dispatch:**
+**WRONG:**
 ```
-Dialog is full width. Likely cause: CSS override in parent.
-Fix approach: Add inline style width: 60vw to the Dialog component.
-```
-
-### If You Need Technical Investigation
-
-Dispatch detective FIRST:
-```
-mcp__provider_delegator__invoke_agent(
-  agent="detective",
-  task_prompt="Investigate: Dialog renders full width instead of 60vw. Find root cause."
-)
+Problem: Scrolling feels janky in DesignDocViewer.
+Fix: Replace custom wheel handling with ScrollArea component.
+Changes needed:
+1. Import ScrollArea from "@/components/ui/scroll-area"
+2. Remove useWheelScrollRef hook
+3. Replace div with ScrollArea
 ```
 
-Then include findings in supervisor dispatch, marked as hypotheses:
-```
-DETECTIVE FINDINGS (verify before implementing):
-- Found CSS conflict in parent component
-- Tailwind class being overridden by global style
+The second example tells the supervisor WHAT to do. That's YOUR job being done badly with incomplete information.
 
-Supervisor should verify these findings and implement appropriate fix.
+### Exception: Detective Findings
+
+If you dispatched detective FIRST, include findings marked as hypotheses:
+
+```
+DETECTIVE FINDINGS (supervisor must verify):
+- Root cause: [what detective found]
+- Location: [file:line]
+
+Supervisor: Verify independently. These are leads, not instructions.
 ```
 
 ## Delegation
@@ -54,40 +72,6 @@ Supervisor should verify these findings and implement appropriate fix.
 **Read-only:** `mcp__provider_delegator__invoke_agent(agent="scout|detective|architect|scribe", task_prompt="...")`
 
 **Implementing (Task):** `Task(subagent_type="<name>-supervisor", prompt="BEAD_ID: {id}\n\n{problem description}")`
-
-## Problem Description, Not Solution Prescription
-
-When dispatching supervisors:
-- DESCRIBE the problem and expected behavior
-- DO NOT prescribe fixes or guess at causes
-- DO NOT include "Likely cause:", "Fix approach:", "Try this:"
-- Let supervisors investigate and determine solutions
-
-**Good dispatch:**
-```
-Dialog is full viewport width. Expected: 60vw, centered.
-Mouse wheel scrolling doesn't work in the modal.
-```
-
-**Bad dispatch:**
-```
-Dialog is full width. Likely cause: CSS override. Fix: add inline style width: 60vw
-Mouse wheel not working - probably pointer-events issue. Try adding pointer-events: auto.
-```
-
-### Exception: Detective Findings
-
-If you dispatched a detective first, include their findings BUT mark them clearly:
-
-```
-DETECTIVE FINDINGS (verify before implementing):
-- Root cause identified as X in file:line
-- Suggested approach: Y
-
-Supervisor: Verify these findings independently before implementing.
-```
-
-Supervisors must still investigate - detective findings are leads, not prescriptions.
 
 ## Beads Commands
 
