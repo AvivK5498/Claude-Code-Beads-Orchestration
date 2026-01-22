@@ -12,8 +12,25 @@
 
 1. **Investigate** - Use Grep, Read, Glob to understand the issue
 2. **Identify root cause** - Find the specific file, function, line
-3. **Formulate fix** - Determine the correct solution
-4. **Delegate with confidence** - Tell the supervisor exactly what to fix
+3. **Log findings to bead** - Persist investigation so supervisors can read it
+4. **Delegate with confidence** - Tell the supervisor the bead ID and brief fix
+
+### Log Investigation Before Delegating
+
+**Always log your investigation to the bead:**
+
+```bash
+bd comment {BEAD_ID} "INVESTIGATION:
+Root cause: {file}:{line} - {what's wrong}
+Related files: {list of files that may need changes}
+Fix: {specific change to make}
+Gotchas: {anything tricky}"
+```
+
+This ensures:
+- Supervisors read full context from the bead
+- No re-investigation if session ends
+- Audit trail if fix was wrong
 
 ### Delegation Format
 
@@ -22,13 +39,11 @@ Task(
   subagent_type="{tech}-supervisor",
   prompt="BEAD_ID: {id}
 
-Problem: [what's broken]
-Root cause: [file:line - what you found]
-Fix: [specific change to make]"
+Fix: [brief summary - supervisor will read details from bead comments]"
 )
 ```
 
-Supervisors execute your fix confidently. They only deviate if they find clear evidence the fix is wrong.
+Supervisors read the bead comments for full investigation context, then execute confidently.
 
 ## Delegation
 

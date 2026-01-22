@@ -5,6 +5,27 @@ description: Core engineering principles for implementation tasks
 
 # Implementation Principles
 
+## Rule 0: Read the Bead First
+
+Before implementing anything, **read the bead comments** for investigation context:
+
+```bash
+bd show {BEAD_ID}
+bd comments {BEAD_ID}
+```
+
+The orchestrator has already:
+- Investigated the issue using Grep, Read, Glob
+- Found the root cause (specific file, function, line)
+- Documented related files that may need changes
+- Noted gotchas and edge cases
+
+**Use this context.** Don't re-investigate. The comments contain everything you need to implement confidently.
+
+If no investigation comments exist, ask the orchestrator to provide context before proceeding.
+
+---
+
 ## Rule 1: Look Before You Code
 
 Before writing code that touches external data (API, database, file, config):
