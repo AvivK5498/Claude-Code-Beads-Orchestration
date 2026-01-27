@@ -34,6 +34,22 @@ The skill walks you through setup, runs the bootstrap via `npx`, then creates te
 - Python 3 (for bootstrap)
 - beads CLI (installed automatically by bootstrap)
 
+## Key Features
+
+**Orchestrator / Supervisor separation** — The orchestrator investigates with Grep, Read, Glob, then delegates implementation to tech-specific supervisors via `Task()`. It never edits code directly. Hooks enforce this.
+
+**Worktree isolation** — Every task gets its own git worktree at `.worktrees/bd-{BEAD_ID}/`. Main stays clean. Multiple tasks can run in parallel without branch conflicts.
+
+**Automatic task tracking** — The orchestrator creates and manages [beads](https://github.com/steveyegge/beads) automatically. You don't touch task management — it creates beads, tracks progress, marks completion, and closes them.
+
+**Epics with dependencies** — Cross-domain features (DB + API + Frontend) become epics with child tasks. Dependencies are enforced — hooks block dispatch of children whose dependencies haven't merged yet.
+
+**Persistent knowledge base** — Agents capture conventions, gotchas, and patterns as they work via `bd comment` with `LEARNED:` and `INVESTIGATION:` prefixes. An async hook extracts these into `.beads/memory/knowledge.jsonl`. Supervisors are blocked from completing without a `LEARNED:` entry. Session start surfaces recent knowledge so agents don't re-investigate solved problems.
+
+**12 enforcement hooks** — Every step of the workflow is enforced. Orchestrator can't edit files. Supervisors can't start without a bead. Edits require a worktree. Completions are verified. Responses stay concise. See [Hooks](#hooks) for the full list.
+
+**Tech stack discovery** — A discovery agent scans your codebase and creates the right supervisors (react-supervisor, python-supervisor, etc.) with best practices injected.
+
 ## How It Works
 
 ```
@@ -58,55 +74,6 @@ The skill walks you through setup, runs the bootstrap via `npx`, then creates te
 **Orchestrator:** Investigates the issue, identifies root cause, logs findings to bead, delegates with brief fix instructions.
 
 **Supervisors:** Read bead comments for context, create isolated worktrees, execute the fix confidently. Created by discovery agent based on your tech stack.
-
-## Worktree Workflow
-
-Each task gets its own isolated worktree at `.worktrees/bd-{BEAD_ID}/`. This keeps the main directory clean and allows parallel work without branch conflicts.
-
-```bash
-# Supervisor creates worktree via API
-curl -X POST http://localhost:3008/api/git/worktree \
-  -H "Content-Type: application/json" \
-  -d '{"repo_path": "...", "bead_id": "BD-001"}'
-
-# Work happens in worktree
-cd .worktrees/bd-BD-001/
-# ... make changes ...
-git add -A && git commit -m "..."
-git push origin bd-BD-001
-
-# User merges via PR in UI
-```
-
-## Automatic Task Management
-
-The orchestrator handles task tracking automatically using [beads](https://github.com/steveyegge/beads). You don't need to manage tasks manually—the orchestrator creates beads, tracks progress, and closes them when work completes.
-
-```bash
-bd create "Add auth" -d "JWT-based authentication"  # Orchestrator creates
-bd update BD-001 --status in_progress               # Supervisor marks started
-bd comment BD-001 "Completed login endpoint"        # Progress logged
-bd update BD-001 --status inreview                  # Supervisor marks done
-bd close BD-001                                     # User closes after merge
-```
-
-## Delegation Format
-
-```python
-Task(
-  subagent_type="react-supervisor",
-  prompt="""BEAD_ID: BD-001
-
-Fix: Add router.push('/dashboard') after successful auth
-(Supervisor reads bead comments for full investigation context)"""
-)
-```
-
-## Epics (Cross-Domain Features)
-
-When a feature spans multiple supervisors (e.g., DB + API + Frontend), the orchestrator creates an epic with child tasks and manages dependencies. Each child gets its own worktree and is dispatched sequentially after the previous child's PR is merged.
-
-You can also explicitly request an epic: *"Add user profiles and create an epic for it."*
 
 ## Knowledge Base
 
@@ -142,7 +109,7 @@ See [docs/memory-architecture.md](docs/memory-architecture.md) for the full desi
 ```
 .claude/
 ├── agents/           # Supervisors (discovery creates tech-specific ones)
-├── hooks/            # Workflow enforcement
+├── hooks/            # Workflow enforcement (12 hooks)
 ├── skills/           # subagents-discipline, react-best-practices
 └── settings.json
 CLAUDE.md             # Orchestrator instructions
@@ -153,20 +120,44 @@ CLAUDE.md             # Orchestrator instructions
 
 ## Hooks
 
-| Hook | Purpose |
-|------|---------|
-| `block-orchestrator-tools.sh` | Orchestrator can't Edit/Write |
-| `enforce-bead-for-supervisor.sh` | Supervisors need BEAD_ID |
-| `enforce-branch-before-edit.sh` | Must be in worktree to edit (not main) |
-| `enforce-sequential-dispatch.sh` | Blocks epic children with unresolved deps |
-| `validate-epic-close.sh` | Can't close epic with open children |
-| `inject-discipline-reminder.sh` | Injects discipline skill reminder |
-| `remind-inprogress.sh` | Warns about in-progress beads |
-| `validate-completion.sh` | Verifies worktree, push, bead status |
-| `enforce-concise-response.sh` | Limits response verbosity |
-| `clarify-vague-request.sh` | Prompts for clarification |
-| `memory-capture.sh` | Extracts LEARNED/INVESTIGATION into knowledge base |
-| `session-start.sh` | Shows task status, knowledge, cleanup suggestions |
+12 hooks enforce the workflow at every step. Grouped by lifecycle event:
+
+**PreToolUse** — Block before action happens:
+
+| Hook | Trigger | Purpose |
+|------|---------|---------|
+| `block-orchestrator-tools.sh` | Edit, Write | Orchestrator can't modify code directly |
+| `enforce-bead-for-supervisor.sh` | Task | Supervisors require BEAD_ID in prompt |
+| `enforce-branch-before-edit.sh` | Edit, Write | Must be in a worktree, not main |
+| `enforce-sequential-dispatch.sh` | Task | Blocks epic children with unresolved deps |
+| `validate-epic-close.sh` | Bash | Can't close epic with open children |
+| `inject-discipline-reminder.sh` | Task | Injects discipline skill context |
+| `remind-inprogress.sh` | Task | Warns about existing in-progress beads |
+
+**PostToolUse** — React after action completes:
+
+| Hook | Trigger | Purpose |
+|------|---------|---------|
+| `enforce-concise-response.sh` | Task | Limits supervisor response verbosity |
+| `memory-capture.sh` | Bash | Captures LEARNED/INVESTIGATION into knowledge base |
+
+**SubagentStop** — Validate before supervisor exits:
+
+| Hook | Trigger | Purpose |
+|------|---------|---------|
+| `validate-completion.sh` | Any | Verifies worktree, push, bead status, LEARNED comment |
+
+**SessionStart** — Run when a new session begins:
+
+| Hook | Trigger | Purpose |
+|------|---------|---------|
+| `session-start.sh` | Any | Shows task status, recent knowledge, cleanup suggestions |
+
+**UserPromptSubmit** — Filter user input:
+
+| Hook | Trigger | Purpose |
+|------|---------|---------|
+| `clarify-vague-request.sh` | Any | Prompts for clarification on ambiguous requests |
 
 ## Advanced: External Providers
 
