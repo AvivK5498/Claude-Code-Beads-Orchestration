@@ -1,5 +1,5 @@
 {
-  "name": "@avivkaplan/beads-orchestration",
+  "name": "beads-orchestration",
   "version": "1.4.0",
   "description": "Multi-agent orchestration for Claude Code with automatic task management",
   "author": "Aviv Kaplan",

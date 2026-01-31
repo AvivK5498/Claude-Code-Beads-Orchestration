@@ -13,7 +13,7 @@ npx skills add AvivK5498/Claude-Code-Beads-Orchestration
 Or via npm:
 
 ```bash
-npm install -g @avivkaplan/beads-orchestration
+npm install -g beads-orchestration
 ```
 
 > macOS and Linux only.
