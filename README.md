@@ -1,68 +1,54 @@
-# Beads Orchestration
+<div align="center">
 
-Multi-agent orchestration for Claude Code. A co-pilot architect that investigates issues, discusses approach with you, then delegates implementation to specialized supervisors.
+# THE CLAUDE PROTOCOL
 
-**[Beads Kanban UI](https://github.com/AvivK5498/Beads-Kanban-UI)** — Visual task management fully compatible with this workflow. Supports tasks, epics, subtasks, dependencies, and design docs.
+**Enforcement-first orchestration for Claude Code. Every agent tracked. Every decision logged. Nothing gets lost.**
 
-## Installation
+**Claude Code plans great. Without structure, nothing survives past one session.**
 
-```bash
-npx skills add AvivK5498/Claude-Code-Beads-Orchestration
-```
+[![npm version](https://img.shields.io/npm/v/beads-orchestration?style=for-the-badge&logo=npm&logoColor=white&color=CB3837)](https://www.npmjs.com/package/beads-orchestration)
+[![GitHub stars](https://img.shields.io/github/stars/AvivK5498/The-Claude-Protocol?style=for-the-badge&logo=github&color=181717)](https://github.com/AvivK5498/The-Claude-Protocol)
+[![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
 
-Or via npm:
-
-```bash
-npm install -g beads-orchestration
-```
-
-> macOS and Linux only.
-
-## Quick Start
+<br>
 
 ```bash
-# In any Claude Code session
-/create-beads-orchestration
+npx skills add AvivK5498/The-Claude-Protocol
 ```
 
-The skill walks you through setup, runs the bootstrap via `npx`, then creates tech-specific supervisors based on your codebase.
+**macOS and Linux.**
 
-### Requirements
+<br>
 
-- Claude Code with hooks support
-- Node.js (for npx)
-- Python 3 (for bootstrap)
-- beads CLI (installed automatically by bootstrap)
+![The Claude Protocol — Kanban UI](screenshots/kanbanui.png)
 
-## Key Features
+<br>
 
-🧭 **Co-pilot architect** — Investigates, presents trade-offs, waits for your confirmation before dispatching. Constructive skeptic, not a blind executor.
+[Why This Exists](#why-this-exists) · [How It Works](#how-it-works) · [Getting Started](#getting-started) · [Hooks](#hooks)
 
-⚡ **Quick fix path** — Trivial single-file changes skip the bead/worktree/PR overhead. Just dispatch, edit, commit, done.
+</div>
 
-🌳 **Worktree isolation** — Every task gets its own worktree. Main stays clean. Parallel work without conflicts.
+---
 
-📋 **Auto task tracking** — [Beads](https://github.com/steveyegge/beads) create, track, and close tasks automatically.
+## Why This Exists
 
-🔗 **Epics & dependencies** — Cross-domain work becomes epics with enforced child dependencies. Independent children dispatch in parallel.
+Claude Code is the best coding agent out there. But let it run unsupervised and you get agents editing main, commits without PRs, lost context every session, and zero traceability on what was done and why.
 
-📝 **Dispatch auto-logging** — Every supervisor dispatch prompt is automatically captured as a bead comment. Full audit trail, zero manual effort.
+Plan mode helps — until you need to coordinate across files, track what was planned vs what shipped, or pick up a task three sessions later. Plans vanish. Context resets. Investigation gets redone from scratch.
 
-🔁 **Follow-up traceability** — Closed beads stay closed. Bug fixes become new beads linked via `bd dep relate` — full history, no reopening.
+The Claude Protocol is the enforcement layer. It wraps Claude Code with 13 hooks that physically block bad actions, isolates every task in its own git worktree, and documents everything automatically — dispatch prompts, agent knowledge, decisions, all of it. [Beads](https://github.com/steveyegge/beads) (git-native tickets) track every unit of work from creation to merge.
 
-🧠 **Knowledge base** — Agents voluntarily capture conventions and gotchas into `.beads/memory/`. Searchable, surfaced at session start.
+The complexity is in the system. What you see: Claude plans with you, you approve, agents execute in isolation, PRs get merged. Done.
 
-🔒 **13 enforcement hooks** — Every workflow step is guarded. See [Hooks](#hooks).
-
-🔎 **Tech stack discovery** — Scans your codebase, creates the right supervisors with best practices injected.
+---
 
 ## How It Works
 
 ```
 ┌─────────────────────────────────────────┐
 │         ORCHESTRATOR (Co-Pilot)         │
+│  Plans with you (Plan mode)            │
 │  Investigates with Grep/Read/Glob       │
-│  Discusses approach with user           │
 │  Delegates implementation via Task()    │
 └──────────────────┬──────────────────────┘
                    │
@@ -77,132 +63,122 @@ The skill walks you through setup, runs the bootstrap via `npx`, then creates te
   bd-BD-001   bd-BD-002   bd-BD-003
 ```
 
-**Orchestrator:** Investigates the issue, discusses with user, proposes a plan. Dispatch prompts are auto-logged to the bead as `DISPATCH_PROMPT` comments.
+**The orchestrator** investigates, discusses with you, and plans. It never writes code. Dispatch prompts are auto-logged to the bead so nothing gets lost.
 
-**Supervisors:** Read bead comments for context, create isolated worktrees, execute the fix confidently. Created by discovery agent based on your tech stack.
+**Supervisors** are created automatically based on your tech stack. They read bead comments for full context, work in isolated worktrees, and push clean PRs.
 
-### Workflow Modes
+**Beads** are git-native tickets. Every task, every epic, every dependency — tracked in your repo, not a third-party service. One bead = one unit of work = one worktree = one PR.
 
-**Quick Fix** — Single file, obvious fix, fully reversible. No bead, no worktree, no PR. Git commit = audit trail.
+### Workflow
 
-**Full Workflow** — Multi-file or uncertain changes. Investigate → discuss → confirm → create bead → dispatch supervisor → worktree → PR → merge.
+**Standalone** — Investigate → plan → approve → create bead → dispatch supervisor → worktree → PR → merge.
 
-Default to full workflow when in doubt.
+**Epics** — Cross-domain work (DB + API + frontend) becomes an epic with enforced child dependencies. Each child gets its own worktree. Dependencies prevent dispatching out of order.
 
-## Knowledge Base
+Every task goes through beads. No exceptions.
 
-Agents build a persistent knowledge base as they work. No extra steps — it piggybacks on `bd comment`.
+### Kanban UI
+
+The Claude Protocol pairs with the [Beads Kanban UI](https://github.com/AvivK5498/Beads-Kanban-UI) for visual task management and GitOps directly from the browser. Track epics, subtasks, dependencies, and PR status across columns — without leaving the board.
+
+---
+
+## Getting Started
 
 ```bash
-# Agent records a useful insight (voluntary)
-bd comment BD-001 "LEARNED: TaskGroup requires @Sendable closures in strict concurrency mode."
+npx skills add AvivK5498/The-Claude-Protocol
 ```
 
-An async hook intercepts `LEARNED:` comments and extracts them into `.beads/memory/knowledge.jsonl`. Each entry is auto-tagged by keyword and attributed to its source.
-
-**Why this works:**
-- Zero friction — agents already use `bd comment`, they just add a prefix
-- No database, no embeddings, no external services — one JSONL file, grep + jq to search
-- Voluntary — agents log insights when they discover something worth remembering
-- Surfaces automatically — session start shows recent knowledge so agents don't re-investigate solved problems
+Or via npm:
 
 ```bash
+npm install -g beads-orchestration
+```
+
+Then in any Claude Code session:
+
+```bash
+/create-beads-orchestration
+```
+
+The skill walks you through setup, scans your tech stack, and creates supervisors with best practices injected.
+
+### Requirements
+
+- Claude Code with hooks support
+- Node.js (for npx)
+- Python 3 (for bootstrap)
+- beads CLI (installed automatically)
+
+---
+
+## What Makes This Different
+
+### Enforcement, Not Suggestions
+
+13 hooks across 5 lifecycle events. They don't warn — they block. The orchestrator can't edit code. Supervisors can't skip beads. Epics can't close with open children. PRs must be merged before a bead is closed.
+
+### Documentation That Writes Itself
+
+Every supervisor dispatch prompt is automatically captured as a bead comment. Agents voluntarily log conventions and gotchas into a persistent knowledge base. Session start surfaces recent knowledge so agents don't re-investigate solved problems.
+
+```bash
+# Agent captures an insight
+bd comment BD-001 "LEARNED: TaskGroup requires @Sendable closures in strict concurrency mode."
+
 # Search the knowledge base
 .beads/memory/recall.sh "concurrency"
-.beads/memory/recall.sh --recent 10
-.beads/memory/recall.sh --stats
 ```
 
-See [docs/memory-architecture.md](docs/memory-architecture.md) for the full design.
+### Follow-Up Traceability
 
-## Bug Fixes & Follow-Up Work
+Closed beads are immutable. Bug fixes become new beads linked via `bd dep relate` — full history, no reopening. Merged branches don't get reused. Each fix gets its own worktree and PR.
 
-Closed beads are immutable. When a bug is found after a task was completed, a new bead is created and linked to the original:
-
-```bash
-bd create "Fix: button click handler race condition" -d "Follow-up to BD-001"
-# Returns: BD-005
-
-bd dep relate BD-005 BD-001   # Bidirectional "see also" — no dependency
-```
-
-The `relates_to` link gives full traceability without reopening anything. A PreToolUse hook enforces this — dispatching a supervisor to a closed or done bead is blocked automatically, with instructions to create a new bead instead.
-
-**Why this matters:**
-- Merged branches don't get reused — avoids SHA conflicts from squash/rebase merges
-- Each fix gets its own worktree and PR
-- Audit trail stays clean — one bead = one unit of work
+---
 
 ## What Gets Installed
 
 ```
 .claude/
-├── agents/           # Supervisors (discovery creates tech-specific ones)
+├── agents/           # Supervisors (auto-created for your tech stack)
 ├── hooks/            # Workflow enforcement (13 hooks)
 ├── skills/           # subagents-discipline, react-best-practices
 └── settings.json
 CLAUDE.md             # Orchestrator instructions
 .beads/               # Task database
   memory/             # Knowledge base (knowledge.jsonl + recall.sh)
-.worktrees/           # Isolated worktrees for each task (created dynamically)
+.worktrees/           # Isolated worktrees per task (created dynamically)
 ```
+
+---
 
 ## Hooks
 
-13 hooks enforce the workflow at every step. Grouped by lifecycle event:
+13 hooks enforce every workflow step. They block before bad actions happen, auto-log after good ones, and validate before supervisors exit.
 
-**PreToolUse** — Block before action happens:
+**PreToolUse** (7 hooks) — Block orchestrator from writing code. Require beads for supervisor dispatch. Enforce worktree isolation. Block closing epics with open children. Enforce sequential dependency dispatch.
 
-| Hook | Trigger | Purpose |
-|------|---------|---------|
-| `block-orchestrator-tools.sh` | Edit, Write | Orchestrator can't modify code directly |
-| `enforce-bead-for-supervisor.sh` | Task | Supervisors require BEAD_ID in prompt |
-| `enforce-branch-before-edit.sh` | Edit, Write | Must be in a worktree, not main |
-| `enforce-sequential-dispatch.sh` | Task | Blocks closed/done beads and epic children with unresolved deps |
-| `validate-epic-close.sh` | Bash | Blocks bead close without merged PR; blocks epic close with open children |
-| `inject-discipline-reminder.sh` | Task | Injects discipline skill context |
-| `remind-inprogress.sh` | Task | Warns about existing in-progress beads |
+**PostToolUse** (3 hooks) — Auto-log dispatch prompts as bead comments. Capture knowledge base entries. Enforce concise supervisor responses.
 
-**PostToolUse** — React after action completes:
+**SubagentStop** (1 hook) — Verify worktree exists, code is pushed, bead status is updated.
 
-| Hook | Trigger | Purpose |
-|------|---------|---------|
-| `enforce-concise-response.sh` | Task | Limits supervisor response verbosity |
-| `log-dispatch-prompt.sh` | Task | Auto-logs dispatch prompts as DISPATCH_PROMPT bead comments |
-| `memory-capture.sh` | Bash | Captures LEARNED comments into knowledge base |
+**SessionStart** (1 hook) — Surface task status, recent knowledge, and cleanup suggestions.
 
-**SubagentStop** — Validate before supervisor exits:
+**UserPromptSubmit** (1 hook) — Prompt for clarification on ambiguous requests.
 
-| Hook | Trigger | Purpose |
-|------|---------|---------|
-| `validate-completion.sh` | Any | Verifies worktree, push, bead status |
-
-**SessionStart** — Run when a new session begins:
-
-| Hook | Trigger | Purpose |
-|------|---------|---------|
-| `session-start.sh` | Any | Shows task status, recent knowledge, cleanup suggestions |
-
-**UserPromptSubmit** — Filter user input:
-
-| Hook | Trigger | Purpose |
-|------|---------|---------|
-| `clarify-vague-request.sh` | Any | Prompts for clarification on ambiguous requests |
+---
 
 ## Advanced: External Providers
 
-By default, all agents run via Claude's Task(). If you want to delegate read-only agents (scout, detective, etc.) to Codex/Gemini instead:
+By default, all agents run via Claude's Task(). To delegate read-only agents (scout, detective, etc.) to Codex/Gemini:
 
 ```bash
 /create-beads-orchestration --external-providers
 ```
 
-**Additional requirements:**
-- Codex CLI: `codex login`
-- Gemini CLI (optional fallback)
-- uv: [install](https://github.com/astral-sh/uv)
+Requires Codex CLI (`codex login`), optionally Gemini CLI, and [uv](https://github.com/astral-sh/uv).
 
-This creates `.mcp.json` with provider-delegator config.
+---
 
 ## License
 
@@ -210,5 +186,5 @@ MIT
 
 ## Credits
 
-- [beads](https://github.com/steveyegge/beads) - Git-native task tracking by Steve Yegge
-- [sub-agents.directory](https://github.com/ayush-that/sub-agents.directory) - External agent templates
+- [beads](https://github.com/steveyegge/beads) — Git-native task tracking by Steve Yegge
+- [sub-agents.directory](https://github.com/ayush-that/sub-agents.directory) — External agent templates

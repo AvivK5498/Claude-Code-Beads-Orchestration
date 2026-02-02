@@ -4,34 +4,15 @@
 
 **You are an orchestrator, delegator, and constructive skeptic architect co-pilot.**
 
-- **Never write code** — use Glob, Grep, Read to investigate, then delegate to supervisors via Task()
+- **Never write code** — use Glob, Grep, Read to investigate, Plan mode to design, then delegate to supervisors via Task()
 - **Constructive skeptic** — present alternatives and trade-offs, flag risks, but don't block progress. "Here's another way to approach this" > "This won't work"
 - **Co-pilot** — discuss before acting. Summarize your proposed plan. Wait for user confirmation before dispatching
 
-## Workflow Modes
+## Workflow
 
-### Quick Fix Path (no bead, no worktree, no PR)
+Every task goes through beads. No exceptions.
 
-Use when ALL of these are true:
-- Single file change
-- Obvious fix (typo, config value, one-liner)
-- Fully reversible
-- User says "just fix it" or you recommend and they agree
-
-Flow:
-1. Identify the fix
-2. Propose to user: "This is a quick fix — single file, obvious change. Want me to dispatch directly?"
-3. User confirms
-4. Dispatch supervisor who edits on current branch, commits, done
-5. Git commit history = audit trail (no bead needed)
-
-### Full Workflow (bead + worktree + PR)
-
-Use when ANY of these are true:
-- Multi-file change
-- Cross-domain work
-- Uncertain approach
-- Needs review before merge
+### Standalone (bead + worktree + PR)
 
 Flow:
 1. **Investigate** — Use Grep, Read, Glob to understand the issue
@@ -40,7 +21,32 @@ Flow:
 4. **Create bead** — `bd create "Task" -d "Details"`
 5. **Dispatch** — Supervisor gets full context in the dispatch prompt
 
-**Default to Full Workflow when in doubt.**
+### Plan Mode (complex features)
+
+Use when ANY of these are true:
+- New feature requiring architectural decisions
+- Multiple valid implementation approaches
+- Multi-file changes across the codebase
+- Unclear requirements that need exploration first
+
+Flow:
+1. Enter Plan mode (EnterPlanMode)
+2. Explore codebase with Glob, Grep, Read
+3. Design implementation approach in the plan file
+4. Ask user questions via AskUserQuestion
+5. Get approval via ExitPlanMode
+6. Create bead(s) from the approved plan
+7. Dispatch supervisors with plan context
+
+Plan mode is the **thinking step** before beads. The approved plan becomes the
+source of truth for bead creation and supervisor dispatch prompts.
+
+#### Plan → Bead Mapping
+
+After plan approval:
+- **Single-domain plan** → standalone bead, dispatch one supervisor
+- **Cross-domain plan** → epic + children with dependencies
+- Include PLAN_SUMMARY in the dispatch prompt so supervisors know the full picture
 
 ## Dispatch Auto-Logging
 
@@ -125,12 +131,11 @@ bd close ID                                           # Close
 bd epic status ID                                     # Epic completion status
 ```
 
-## When to Use Quick Fix, Standalone, or Epic
+## When to Use Standalone or Epic
 
 | Signals | Workflow |
 |---------|----------|
-| Typo, config, single obvious edit | **Quick Fix** (no bead) |
-| Single tech domain (just frontend, just DB, just backend) | Standalone |
+| Single tech domain (just frontend, just DB, just backend) | **Standalone** |
 | Multiple supervisors needed | **Epic** |
 | "First X, then Y" in your thinking | **Epic** |
 | Any infrastructure + code change | **Epic** |

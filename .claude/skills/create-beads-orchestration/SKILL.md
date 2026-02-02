@@ -81,7 +81,7 @@ AskUserQuestion(
 ## Step 2: Clone and Run Bootstrap
 
 ```bash
-git clone --depth=1 https://github.com/AvivK5498/Claude-Code-Beads-Orchestration "${TMPDIR:-/tmp}/beads-orchestration-setup"
+git clone --depth=1 https://github.com/AvivK5498/The-Claude-Protocol "${TMPDIR:-/tmp}/beads-orchestration-setup"
 ```
 
 ```bash
@@ -205,4 +205,4 @@ rm -rf "${TMPDIR:-/tmp}/beads-orchestration-setup"
 
 ## More Information
 
-See the full documentation: https://github.com/AvivK5498/Claude-Code-Beads-Orchestration
+See the full documentation: https://github.com/AvivK5498/The-Claude-Protocol

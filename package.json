@@ -1,12 +1,12 @@
 {
   "name": "beads-orchestration",
-  "version": "1.4.0",
+  "version": "2.0.0",
   "description": "Multi-agent orchestration for Claude Code with automatic task management",
   "author": "Aviv Kaplan",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/AvivK5498/Claude-Code-Beads-Orchestration"
+    "url": "https://github.com/AvivK5498/The-Claude-Protocol"
   },
   "keywords": [
     "claude",

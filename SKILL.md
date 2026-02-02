@@ -260,4 +260,4 @@ Design docs ensure consistency across epic children:
 
 ## More Information
 
-See the full documentation: https://github.com/AvivK5498/Claude-Code-Beads-Orchestration
+See the full documentation: https://github.com/AvivK5498/The-Claude-Protocol

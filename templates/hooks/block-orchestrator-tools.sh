@@ -29,6 +29,14 @@ fi
 
 [[ "$IS_SUBAGENT" == "true" ]] && exit 0
 
+# Allow Plan mode — orchestrator can write to ~/.claude/plans/
+if [[ "$TOOL_NAME" == "Edit" ]] || [[ "$TOOL_NAME" == "Write" ]]; then
+  FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
+  if [[ "$FILE_PATH" == *"/.claude/plans/"* ]]; then
+    exit 0
+  fi
+fi
+
 # DENYLIST: Block implementation tools for orchestrator
 BLOCKED="Edit|Write|NotebookEdit"
 
