@@ -8,9 +8,10 @@ const fs = require('fs');
 const path = require('path');
 const {
   readStdinJSON, getField, deny, ask,
-  getCurrentBranch, containsPathSegment,
+  getCurrentBranch, containsPathSegment, runHook,
 } = require('./hook-utils');
 
+runHook('block-orchestrator-tools', () => {
 const input = readStdinJSON();
 const toolName = getField(input, 'tool_name');
 
@@ -152,3 +153,4 @@ if (toolName === 'Bash') {
 
 // Allow everything else
 process.exit(0);
+});

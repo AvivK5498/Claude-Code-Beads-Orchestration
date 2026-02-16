@@ -197,6 +197,46 @@ function containsPathSegment(filePath, segment) {
 }
 
 // ---------------------------------------------------------------------------
+// Error logging
+// ---------------------------------------------------------------------------
+
+const LOG_FILE_NAME = 'beads_orchestrator_errors.log';
+
+/**
+ * Append a timestamped error entry to beads_orchestrator_errors.log
+ * in the project root.  Never throws — logging failure must not break hooks.
+ */
+function logError(hookName, err) {
+  try {
+    const projectDir = getProjectDir();
+    const logPath = path.join(projectDir, LOG_FILE_NAME);
+    const ts = new Date().toISOString();
+    const msg = err instanceof Error ? err.stack || err.message : String(err);
+    fs.appendFileSync(logPath, `[${ts}] [${hookName}] ${msg}\n`);
+  } catch {
+    // Logging must never break the hook
+  }
+}
+
+/**
+ * Wrap a hook's main function with error handling.
+ * On unhandled exception: logs to beads_orchestrator_errors.log and exits 0
+ * (fail open — hook error should not block the user).
+ *
+ * Usage in each hook file:
+ *   const { runHook } = require('./hook-utils');
+ *   runHook('hook-name', () => { ... });
+ */
+function runHook(hookName, fn) {
+  try {
+    fn();
+  } catch (err) {
+    logError(hookName, err);
+    process.exit(0);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
 
@@ -216,4 +256,6 @@ module.exports = {
   parseBeadId,
   parseEpicId,
   containsPathSegment,
+  logError,
+  runHook,
 };

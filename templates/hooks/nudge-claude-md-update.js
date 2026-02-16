@@ -5,8 +5,9 @@
 
 const fs = require('fs');
 const path = require('path');
-const { getRepoRoot, injectText } = require('./hook-utils');
+const { getRepoRoot, injectText, runHook } = require('./hook-utils');
 
+runHook('nudge-claude-md-update', () => {
 const repoRoot = getRepoRoot();
 if (!repoRoot) process.exit(0);
 
@@ -48,3 +49,4 @@ Update with: Edit CLAUDE.md → add content under "## Current State"
 - "## Tech Stack" if new technologies were discovered
 `);
 }
+});

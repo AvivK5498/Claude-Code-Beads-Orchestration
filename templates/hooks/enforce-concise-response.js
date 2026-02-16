@@ -3,8 +3,9 @@
 
 // PostToolUse: Enforce concise responses from subagents
 
-const { readStdinJSON, getField } = require('./hook-utils');
+const { readStdinJSON, getField, runHook } = require('./hook-utils');
 
+runHook('enforce-concise-response', () => {
 const input = readStdinJSON();
 const toolName = getField(input, 'tool_name');
 
@@ -27,3 +28,4 @@ if (lineCount > MAX_LINES || charCount > MAX_CHARS) {
   };
   process.stdout.write(JSON.stringify(out));
 }
+});

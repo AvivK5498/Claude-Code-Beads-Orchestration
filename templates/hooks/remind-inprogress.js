@@ -3,11 +3,13 @@
 
 // PreToolUse:Task — Soft reminder to set bead status before dispatch
 
-const { readStdinJSON, getField, injectText } = require('./hook-utils');
+const { readStdinJSON, getField, injectText, runHook } = require('./hook-utils');
 
-const input = readStdinJSON();
-const prompt = getField(input, 'tool_input.prompt');
+runHook('remind-inprogress', () => {
+  const input = readStdinJSON();
+  const prompt = getField(input, 'tool_input.prompt');
 
-if (prompt.includes('BEAD_ID:')) {
-  injectText('IMPORTANT: Before dispatching, ensure bead is in_progress: bd update {BEAD_ID} --status in_progress');
-}
+  if (prompt.includes('BEAD_ID:')) {
+    injectText('IMPORTANT: Before dispatching, ensure bead is in_progress: bd update {BEAD_ID} --status in_progress');
+  }
+});

@@ -3,8 +3,9 @@
 
 // PreToolUse: Block Edit/Write on main branch outside worktrees
 
-const { readStdinJSON, getField, deny, getCurrentBranch, containsPathSegment } = require('./hook-utils');
+const { readStdinJSON, getField, deny, getCurrentBranch, containsPathSegment, runHook } = require('./hook-utils');
 
+runHook('enforce-branch-before-edit', () => {
 const input = readStdinJSON();
 const toolName = getField(input, 'tool_name');
 
@@ -32,3 +33,4 @@ if (branch === 'main' || branch === 'master') {
     'Then cd into .worktrees/bd-{BEAD_ID}/ to make changes.'
   );
 }
+});

@@ -6,9 +6,10 @@
 const fs = require('fs');
 const {
   readStdinJSON, getField, deny, parseBeadId,
-  execCommand, execCommandJSON,
+  execCommand, execCommandJSON, runHook,
 } = require('./hook-utils');
 
+runHook('enforce-sequential-dispatch', () => {
 const input = readStdinJSON();
 const toolName = getField(input, 'tool_name');
 
@@ -98,3 +99,4 @@ if (beadId.includes('.')) {
     );
   }
 }
+});

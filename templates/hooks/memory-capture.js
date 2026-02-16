@@ -5,8 +5,9 @@
 
 const fs = require('fs');
 const path = require('path');
-const { readStdinJSON, getField, getProjectDir } = require('./hook-utils');
+const { readStdinJSON, getField, getProjectDir, runHook } = require('./hook-utils');
 
+runHook('memory-capture', () => {
 const input = readStdinJSON();
 const toolName = getField(input, 'tool_name');
 if (toolName !== 'Bash') process.exit(0);
@@ -94,3 +95,4 @@ try {
 } catch {
   // Rotation failure is non-critical
 }
+});

@@ -3,8 +3,9 @@
 
 // PostToolUse:Task (async) — Auto-log dispatch prompts to bead comments
 
-const { readStdinJSON, getField, parseBeadId, execCommand } = require('./hook-utils');
+const { readStdinJSON, getField, parseBeadId, execCommand, runHook } = require('./hook-utils');
 
+runHook('log-dispatch-prompt', () => {
 const input = readStdinJSON();
 const toolName = getField(input, 'tool_name');
 
@@ -26,3 +27,4 @@ const truncated = prompt.length > 2048 ? prompt.slice(0, 2048) : prompt;
 
 // Log dispatch to bead (fail silently)
 execCommand('bd', ['comment', beadId, `DISPATCH_PROMPT [${subagentType}]:\n\n${truncated}`]);
+});

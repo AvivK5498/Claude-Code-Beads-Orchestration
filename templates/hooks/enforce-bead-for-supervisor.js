@@ -3,25 +3,26 @@
 
 // PreToolUse:Task — Enforce bead exists before supervisor dispatch
 
-const { readStdinJSON, getField, deny } = require('./hook-utils');
+const { readStdinJSON, getField, deny, runHook } = require('./hook-utils');
 
-const input = readStdinJSON();
-const toolName = getField(input, 'tool_name');
+runHook('enforce-bead-for-supervisor', () => {
+  const input = readStdinJSON();
+  const toolName = getField(input, 'tool_name');
 
-if (toolName !== 'Task') process.exit(0);
+  if (toolName !== 'Task') process.exit(0);
 
-const subagentType = getField(input, 'tool_input.subagent_type');
-const prompt = getField(input, 'tool_input.prompt');
+  const subagentType = getField(input, 'tool_input.subagent_type');
+  const prompt = getField(input, 'tool_input.prompt');
 
-// Only enforce for supervisors
-if (!subagentType.includes('supervisor')) process.exit(0);
+  // Only enforce for supervisors
+  if (!subagentType.includes('supervisor')) process.exit(0);
 
-// Exception: merge-supervisor is exempt
-if (subagentType === 'merge-supervisor') process.exit(0);
+  // Exception: merge-supervisor is exempt
+  if (subagentType === 'merge-supervisor') process.exit(0);
 
-// Check for BEAD_ID in prompt
-if (!prompt.includes('BEAD_ID:')) {
-  deny(
+  // Check for BEAD_ID in prompt
+  if (!prompt.includes('BEAD_ID:')) {
+    deny(
     '<bead-required>\n' +
     'All supervisor work MUST be tracked with a bead.\n\n' +
     '<action>\n' +
@@ -35,5 +36,6 @@ if (!prompt.includes('BEAD_ID:')) {
     '</action>\n\n' +
     'Each task creates its own worktree at .worktrees/bd-{BEAD_ID}/\n' +
     '</bead-required>'
-  );
-}
+    );
+  }
+});

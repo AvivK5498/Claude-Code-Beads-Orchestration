@@ -5,8 +5,9 @@
 
 const fs = require('fs');
 const path = require('path');
-const { injectText, execCommand, getProjectDir } = require('./hook-utils');
+const { injectText, execCommand, getProjectDir, runHook } = require('./hook-utils');
 
+runHook('session-start', () => {
 const projectDir = getProjectDir();
 const beadsDir = path.join(projectDir, '.beads');
 
@@ -169,3 +170,4 @@ try {
 
 output.push('');
 injectText(output.join('\n'));
+});

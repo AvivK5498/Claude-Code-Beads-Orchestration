@@ -7,9 +7,10 @@ const fs = require('fs');
 const path = require('path');
 const {
   readStdinJSON, getField, approve, block,
-  execCommand, execCommandJSON, getRepoRoot,
+  execCommand, execCommandJSON, getRepoRoot, runHook,
 } = require('./hook-utils');
 
+runHook('validate-completion', () => {
 const input = readStdinJSON();
 const agentTranscript = getField(input, 'agent_transcript_path');
 const mainTranscript = getField(input, 'transcript_path');
@@ -175,3 +176,4 @@ if (lineCount > 15 || charCount > 800) {
 }
 
 approve();
+});

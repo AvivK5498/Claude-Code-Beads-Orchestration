@@ -21,3 +21,6 @@ Thumbs.db
 # Test outputs
 /tmp/
 .history/
+
+# bv (beads viewer) local config and caches
+.bv/
