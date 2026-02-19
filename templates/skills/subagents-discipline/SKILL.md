@@ -1,6 +1,7 @@
 ---
 name: subagents-discipline
 description: Core engineering principles for implementation tasks
+advertise: true
 ---
 
 # Implementation Principles

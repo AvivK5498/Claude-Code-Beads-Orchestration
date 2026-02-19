@@ -21,3 +21,6 @@ Thumbs.db
 # Test outputs
 /tmp/
 .history/
+
+# Mux local instruction override (optional)
+.mux/AGENTS.local.md
