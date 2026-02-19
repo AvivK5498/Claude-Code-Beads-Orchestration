@@ -2,7 +2,7 @@
 
 # THE CLAUDE PROTOCOL
 
-**Enforcement-first orchestration for Claude Code. Every agent tracked. Every decision logged. Nothing gets lost.**
+**Enforcement-first orchestration for Claude Code, with optional Mux workspace integration. Every agent tracked. Every decision logged. Nothing gets lost.**
 
 **Claude Code plans great. Without structure, nothing survives past one session.**
 
@@ -83,6 +83,17 @@ Every task goes through beads — unless the user explicitly approves a quick fi
 
 The Claude Protocol pairs with the [Beads Kanban UI](https://github.com/AvivK5498/Beads-Kanban-UI) for visual task management and GitOps directly from the browser. Track epics, subtasks, dependencies, and PR status across columns — without leaving the board.
 
+### Mux Integration (Optional)
+
+You can also bootstrap **Mux-compatible workspace files** to align with Mux's instruction and hook model:
+
+- `.mux/AGENTS.md` (workspace instruction layer)
+- `.mux/init` (runs `bd prime --stealth`)
+- `.mux/tool_post` (syncs beads after edits)
+- `.mux/tool_env` (ensures `~/bin` is on `PATH` for bash tool calls)
+
+These files match the concepts documented in `https://mux.coder.com/` (instruction files + init/tool hooks) while keeping beads as the source of truth for task tracking.
+
 ---
 
 ## Getting Started
@@ -102,6 +113,8 @@ Then in any Claude Code session:
 ```bash
 /create-beads-orchestration
 ```
+
+For Mux-oriented projects, pass `--with-mux` in the bootstrap command prompted by the skill (or run `beads-orchestration bootstrap --with-mux`) to use **Mux-only mode** (`.mux/*` + `.beads`, no `.claude/*`).
 
 The skill walks you through setup, scans your tech stack, and creates supervisors with best practices injected.
 
@@ -154,6 +167,13 @@ CLAUDE.md             # Orchestrator instructions
 .beads/               # Task database
   memory/             # Knowledge base (knowledge.jsonl + recall.sh)
 .worktrees/           # Isolated worktrees per task (created dynamically)
+
+# With --with-mux (Mux-only mode)
+.mux/
+├── AGENTS.md         # Mux workspace instruction layer
+├── init              # Workspace init hook (bd prime --stealth)
+├── tool_post         # Post-tool hook (bd sync on file edits)
+└── tool_env          # Bash env hook (adds ~/bin to PATH)
 ```
 
 ---
@@ -173,6 +193,16 @@ CLAUDE.md             # Orchestrator instructions
 **UserPromptSubmit** (1 hook) — Prompt for clarification on ambiguous requests.
 
 ---
+
+## Advanced: Mux Workspace Mode
+
+Use bootstrap with Mux files:
+
+```bash
+beads-orchestration bootstrap --project-dir . --with-mux
+```
+
+This installs only Mux + beads files (`.mux/*` and `.beads`) and intentionally skips all `.claude/*` installation.
 
 ## Advanced: External Providers
 

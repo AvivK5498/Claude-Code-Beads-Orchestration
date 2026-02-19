@@ -1,6 +1,7 @@
 ---
 name: subagents-discipline
 description: Invoke at the start of any implementation task to enforce verification-first development
+advertise: true
 ---
 
 # Implementation Discipline

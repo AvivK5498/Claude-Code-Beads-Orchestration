@@ -1,7 +1,8 @@
 ---
 name: create-beads-orchestration
-description: Bootstrap lean multi-agent orchestration with beads task tracking. Use for projects needing agent delegation without heavy MCP overhead.
+description: Bootstrap lean multi-agent orchestration with beads task tracking. Includes optional Mux workspace integration.
 user-invocable: true
+advertise: true
 ---
 
 # Create Beads Orchestration
@@ -83,6 +84,17 @@ Ask the user or auto-detect from package.json/pyproject.toml.
 which bead-kanban 2>/dev/null && echo "KANBAN_FOUND" || echo "KANBAN_NOT_FOUND"
 ```
 
+### 1.3 Detect Mux usage (optional but recommended)
+
+Check whether the project already uses Mux workspace files:
+
+```bash
+ls .mux/AGENTS.md .mux/init .mux/tool_post .mux/tool_env >/dev/null 2>&1 && echo "MUX_FOUND" || echo "MUX_NOT_FOUND"
+```
+
+- If `MUX_FOUND` → Use `--with-mux` in bootstrap command (Mux-only mode).
+- If `MUX_NOT_FOUND` → Ask user if they want Mux-only compatibility. If yes, use `--with-mux`.
+
 **If KANBAN_FOUND** → Use `--with-kanban-ui` flag. Tell the user:
 > Detected Beads Kanban UI. Configuring worktree management via API.
 
@@ -118,20 +130,31 @@ npx beads-orchestration@latest bootstrap \
   --project-dir "{{PROJECT_DIR}}" \
   --with-kanban-ui
 
+# With Kanban UI + Mux workspace files:
+npx beads-orchestration@latest bootstrap \
+  --project-name "{{PROJECT_NAME}}" \
+  --project-dir "{{PROJECT_DIR}}" \
+  --with-kanban-ui \
+  --with-mux
+
 # Without Kanban UI (git worktrees only):
 npx beads-orchestration@latest bootstrap \
   --project-name "{{PROJECT_NAME}}" \
   --project-dir "{{PROJECT_DIR}}"
+
+# Without Kanban UI + Mux workspace files:
+npx beads-orchestration@latest bootstrap \
+  --project-name "{{PROJECT_NAME}}" \
+  --project-dir "{{PROJECT_DIR}}" \
+  --with-mux
 ```
 
 The bootstrap script will:
 1. Install beads CLI (via brew, npm, or go)
 2. Initialize `.beads/` directory
-3. Copy agent templates to `.claude/agents/`
-4. Copy hooks to `.claude/hooks/`
-5. Configure `.claude/settings.json`
-6. Create `CLAUDE.md` with orchestrator instructions
-7. Update `.gitignore`
+3. Update `.gitignore`
+4. If `--with-mux`: install Mux-only files (`.mux/AGENTS.md`, `.mux/init`, `.mux/tool_post`, `.mux/tool_env`) and skip `.claude/*`
+5. If not `--with-mux`: install full Claude orchestration (`.claude/agents`, `.claude/hooks`, `.claude/settings.json`, `CLAUDE.md`)
 
 **Verify bootstrap completed successfully before proceeding.**
 
@@ -211,6 +234,12 @@ Discovery will:
 
 **Without `--with-kanban-ui`:**
 - Worktrees created via raw git commands
+
+**With `--with-mux` (Mux-only mode):**
+- Installs `.mux/AGENTS.md` instruction layer
+- Installs `.mux/init`, `.mux/tool_post`, `.mux/tool_env`
+- Runs `.mux/init` once after bootstrap (best-effort)
+- Skips all `.claude/*` and `CLAUDE.md`
 
 ## Epic Workflow (Cross-Domain Features)
 

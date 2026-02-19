@@ -10,7 +10,7 @@ Creates:
 - .mcp.json with provider-delegator configuration (only with --external-providers)
 
 Usage:
-    python bootstrap.py [--project-name NAME] [--project-dir DIR] [--with-kanban-ui]
+    python bootstrap.py [--project-name NAME] [--project-dir DIR] [--with-kanban-ui] [--with-mux]
 
 Modes:
     Default: All agents use Claude Task() directly (claude-only)
@@ -620,18 +620,72 @@ def copy_claude_md(project_dir: Path, project_name: str, claude_only: bool = Fal
 
 
 # ============================================================================
+# MUX WORKSPACE FILES
+# ============================================================================
+
+def copy_mux_workspace_files(project_dir: Path, project_name: str) -> None:
+    """Install Mux workspace integration files (.mux/init, .mux/tool_post, .mux/tool_env, .mux/AGENTS.md)."""
+    print("\n[MUX] Installing Mux workspace files...")
+
+    mux_template_dir = TEMPLATES_DIR / "mux"
+    mux_dir = project_dir / ".mux"
+    mux_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy instruction layer
+    agents_template = mux_template_dir / "AGENTS.md"
+    agents_dest = mux_dir / "AGENTS.md"
+    if agents_template.exists():
+        copy_and_replace(agents_template, agents_dest, {"[Project]": project_name})
+        print("  - Copied .mux/AGENTS.md")
+    else:
+        print("  - WARNING: Missing template templates/mux/AGENTS.md")
+
+    # Copy Mux hooks
+    init_src = mux_template_dir / "init"
+    init_dest = mux_dir / "init"
+    if init_src.exists():
+        shutil.copy2(init_src, init_dest)
+        init_dest.chmod(init_dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        print("  - Copied .mux/init")
+    else:
+        print("  - WARNING: Missing template templates/mux/init")
+
+    tool_post_src = mux_template_dir / "tool_post"
+    tool_post_dest = mux_dir / "tool_post"
+    if tool_post_src.exists():
+        shutil.copy2(tool_post_src, tool_post_dest)
+        tool_post_dest.chmod(tool_post_dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        print("  - Copied .mux/tool_post")
+    else:
+        print("  - WARNING: Missing template templates/mux/tool_post")
+
+    tool_env_src = mux_template_dir / "tool_env"
+    tool_env_dest = mux_dir / "tool_env"
+    if tool_env_src.exists():
+        shutil.copy2(tool_env_src, tool_env_dest)
+        tool_env_dest.chmod(0o644)
+        print("  - Copied .mux/tool_env")
+    else:
+        print("  - WARNING: Missing template templates/mux/tool_env")
+
+    print("  DONE: Mux workspace files installed")
+
+
+# ============================================================================
 # GITIGNORE
 # ============================================================================
 
-def setup_gitignore(project_dir: Path, claude_only: bool = False) -> None:
-    """Ensure .beads is in .gitignore. .claude/ is tracked (not ignored)."""
+def setup_gitignore(project_dir: Path, claude_only: bool = False, with_mux: bool = False) -> None:
+    """Ensure ephemeral files are in .gitignore. .claude/ and .mux/ are tracked."""
     step = "[7/7]" if claude_only else "[7/8]"
     print(f"\n{step} Setting up .gitignore...")
 
     gitignore_path = project_dir / ".gitignore"
-    # Only ignore .beads/ (ephemeral task data) and .mcp.json (user-specific paths)
-    # .claude/ is tracked so it survives git operations
+    # Ignore ephemeral task/runtime data and local instruction overrides.
+    # .claude/ and .mux/ are tracked so configuration survives git operations.
     entries_to_add = [".beads/", ".mcp.json"]
+    if with_mux:
+        entries_to_add.append(".mux/AGENTS.local.md")
 
     if gitignore_path.exists():
         content = gitignore_path.read_text()
@@ -651,12 +705,18 @@ def setup_gitignore(project_dir: Path, claude_only: bool = False) -> None:
                 # Add newline if file doesn't end with one
                 if content and not content.endswith("\n"):
                     f.write("\n")
-                f.write("\n# Beads task tracking (ephemeral)\n")
+                if with_mux:
+                    f.write("\n# Beads and local agent runtime state (ephemeral)\n")
+                else:
+                    f.write("\n# Beads task tracking (ephemeral)\n")
                 for entry in missing:
                     f.write(f"{entry}\n")
                     print(f"  - Added {entry} to .gitignore")
         else:
-            print("  - .beads/ and .mcp.json already in .gitignore")
+            if with_mux:
+                print("  - .beads/, .mcp.json, and .mux/AGENTS.local.md already in .gitignore")
+            else:
+                print("  - .beads/ and .mcp.json already in .gitignore")
     else:
         # Create new .gitignore
         content = """# Beads task tracking (ephemeral)
@@ -665,11 +725,26 @@ def setup_gitignore(project_dir: Path, claude_only: bool = False) -> None:
 # MCP config (user-specific paths)
 .mcp.json
 """
+        if with_mux:
+            content = """# Beads and local agent runtime state (ephemeral)
+.beads/
+.mux/AGENTS.local.md
+
+# MCP config (user-specific paths)
+.mcp.json
+"""
+
         gitignore_path.write_text(content)
-        print("  - Created .gitignore with .beads/ and .mcp.json")
+        if with_mux:
+            print("  - Created .gitignore with .beads/, .mcp.json, and .mux/AGENTS.local.md")
+        else:
+            print("  - Created .gitignore with .beads/ and .mcp.json")
 
     print("  DONE: .gitignore configured")
-    print("  NOTE: .claude/ is tracked (not ignored) to prevent accidental loss")
+    if with_mux:
+        print("  NOTE: .claude/ and .mux/ are tracked (not ignored) to prevent accidental loss")
+    else:
+        print("  NOTE: .claude/ is tracked (not ignored) to prevent accidental loss")
 
 
 # ============================================================================
@@ -720,20 +795,36 @@ def create_mcp_config(project_dir: Path, venv_python: Path) -> None:
 # VERIFICATION
 # ============================================================================
 
-def verify_installation(project_dir: Path, claude_only: bool = False) -> bool:
+def verify_installation(project_dir: Path, claude_only: bool = False, with_mux: bool = False, mux_only: bool = False) -> bool:
     """Verify all components were installed correctly."""
-    checks = {
-        ".claude/hooks": "Hooks directory",
-        ".claude/agents": "Agents directory",
-        ".claude/settings.json": "Settings file",
-        ".beads": "Beads directory",
-        "CLAUDE.md": "CLAUDE.md",
-        ".gitignore": ".gitignore",
-    }
+    if mux_only:
+        checks = {
+            ".beads": "Beads directory",
+            ".gitignore": ".gitignore",
+            ".mux/AGENTS.md": "Mux workspace AGENTS.md",
+            ".mux/init": "Mux init hook",
+            ".mux/tool_post": "Mux tool_post hook",
+            ".mux/tool_env": "Mux tool_env hook",
+        }
+    else:
+        checks = {
+            ".claude/hooks": "Hooks directory",
+            ".claude/agents": "Agents directory",
+            ".claude/settings.json": "Settings file",
+            ".beads": "Beads directory",
+            "CLAUDE.md": "CLAUDE.md",
+            ".gitignore": ".gitignore",
+        }
 
-    # Only check for .mcp.json in external providers mode
-    if not claude_only:
-        checks[".mcp.json"] = "MCP config"
+        if with_mux:
+            checks[".mux/AGENTS.md"] = "Mux workspace AGENTS.md"
+            checks[".mux/init"] = "Mux init hook"
+            checks[".mux/tool_post"] = "Mux tool_post hook"
+            checks[".mux/tool_env"] = "Mux tool_env hook"
+
+        # Only check for .mcp.json in external providers mode
+        if not claude_only:
+            checks[".mcp.json"] = "MCP config"
 
     print("\n=== Verification ===")
     all_good = True
@@ -747,21 +838,22 @@ def verify_installation(project_dir: Path, claude_only: bool = False) -> bool:
             all_good = False
 
     # Count files
-    hooks_dir = project_dir / ".claude/hooks"
-    if hooks_dir.exists():
-        hook_count = len(list(hooks_dir.glob("*.sh")))
-        print(f"  - Hooks: {hook_count}")
+    if not mux_only:
+        hooks_dir = project_dir / ".claude/hooks"
+        if hooks_dir.exists():
+            hook_count = len(list(hooks_dir.glob("*.sh")))
+            print(f"  - Hooks: {hook_count}")
 
-    agents_dir = project_dir / ".claude/agents"
-    if agents_dir.exists():
-        agent_count = len(list(agents_dir.glob("*.md")))
-        print(f"  - Agents: {agent_count}")
+        agents_dir = project_dir / ".claude/agents"
+        if agents_dir.exists():
+            agent_count = len(list(agents_dir.glob("*.md")))
+            print(f"  - Agents: {agent_count}")
 
-    skills_dir = project_dir / ".claude/skills"
-    if skills_dir.exists():
-        skill_count = len(list(skills_dir.iterdir()))
-        if skill_count > 0:
-            print(f"  - Skills: {skill_count}")
+        skills_dir = project_dir / ".claude/skills"
+        if skills_dir.exists():
+            skill_count = len(list(skills_dir.iterdir()))
+            if skill_count > 0:
+                print(f"  - Skills: {skill_count}")
 
     return all_good
 
@@ -780,11 +872,14 @@ def main():
                         help="Use Codex/Gemini for delegation (default: Claude-only)")
     parser.add_argument("--with-kanban-ui", action="store_true",
                         help="Use Beads Kanban UI API for worktree creation (with git fallback)")
+    parser.add_argument("--with-mux", action="store_true",
+                        help="Mux-only mode: install .mux files and skip all .claude installation")
     args = parser.parse_args()
 
     project_dir = Path(args.project_dir).resolve()
     claude_only = not args.external_providers  # Default is now claude-only
     with_kanban_ui = args.with_kanban_ui
+    with_mux = args.with_mux
 
     # Ensure project directory exists
     project_dir.mkdir(parents=True, exist_ok=True)
@@ -798,10 +893,12 @@ def main():
 
     mode_str = "CLAUDE-ONLY" if claude_only else "EXTERNAL PROVIDERS"
     worktree_str = "API + git fallback" if with_kanban_ui else "git only"
+    mux_str = "enabled" if with_mux else "disabled"
     print(f"\nBootstrapping beads orchestration for: {project_name}")
     print(f"Directory: {project_dir}")
     print(f"Mode: {mode_str}")
     print(f"Worktrees: {worktree_str}")
+    print(f"Mux workspace files: {mux_str}")
     print("=" * 60)
 
     # Verify templates exist
@@ -811,6 +908,49 @@ def main():
         sys.exit(1)
 
     venv_python = None
+
+    # In mux-only mode, install only beads + .mux integration and skip all .claude files.
+    mux_only = with_mux
+
+    if mux_only:
+        print("\n[MUX-ONLY] Skipping .claude orchestration installation")
+
+        if not install_beads(project_dir, claude_only=True):
+            print("\nERROR: Beads CLI is required. Aborting bootstrap.")
+            sys.exit(1)
+
+        copy_mux_workspace_files(project_dir, project_name)
+        setup_gitignore(project_dir, claude_only=True, with_mux=True)
+
+        if not verify_installation(project_dir, claude_only=True, with_mux=True, mux_only=True):
+            print("\nWARNING: Installation incomplete - check errors above")
+
+        run_mux_init_if_present(project_dir, True)
+
+        print("\n" + "=" * 60)
+        print("BOOTSTRAP COMPLETE")
+        print("=" * 60)
+        print(f"""
+Mode: MUX-ONLY
+
+Installed:
+- .beads (task tracking)
+- .mux/AGENTS.md
+- .mux/init
+- .mux/tool_post
+- .mux/tool_env
+
+Skipped intentionally:
+- .claude/agents
+- .claude/hooks
+- .claude/settings.json
+- CLAUDE.md
+
+Next steps:
+1. Restart your Mux workspace session
+2. Continue working with Mux + beads workflow
+""")
+        return
 
     # Step 0: Setup bundled provider-delegator (skip in claude-only mode)
     if not claude_only:
@@ -834,7 +974,9 @@ def main():
         copy_settings(project_dir, claude_only=False)
         copy_claude_md(project_dir, project_name, claude_only=False)
         setup_memory(project_dir)
-        setup_gitignore(project_dir, claude_only=False)
+        if with_mux:
+            copy_mux_workspace_files(project_dir, project_name)
+        setup_gitignore(project_dir, claude_only=False, with_mux=with_mux)
         create_mcp_config(project_dir, venv_python)
     else:
         # Claude-only mode: skip provider setup
@@ -854,11 +996,16 @@ def main():
         copy_settings(project_dir, claude_only=True)
         copy_claude_md(project_dir, project_name, claude_only=True)
         setup_memory(project_dir)
-        setup_gitignore(project_dir, claude_only=True)
+        if with_mux:
+            copy_mux_workspace_files(project_dir, project_name)
+        setup_gitignore(project_dir, claude_only=True, with_mux=with_mux)
 
     # Verify
-    if not verify_installation(project_dir, claude_only):
+    if not verify_installation(project_dir, claude_only, with_mux=with_mux):
         print("\nWARNING: Installation incomplete - check errors above")
+
+    # Optional Mux init hook execution (matches Mux init behavior for new workspaces)
+    run_mux_init_if_present(project_dir, with_mux)
 
     print("\n" + "=" * 60)
     print("BOOTSTRAP COMPLETE")
@@ -872,7 +1019,10 @@ Next steps:
 
 1. Restart Claude Code to load new hooks and agents
 
-2. **REQUIRED: Run discovery to create supervisors**
+2. (Optional) If you enabled Mux integration, restart your Mux workspace session
+   so .mux/init/.mux/tool_post/.mux/tool_env and .mux/AGENTS.md are loaded.
+
+3. **REQUIRED: Run discovery to create supervisors**
    Discovery will scan your codebase and fetch specialist agents:
 
    Task(
@@ -880,10 +1030,10 @@ Next steps:
        prompt="Detect tech stack and create supervisors for {project_name}"
    )
 
-3. Create your first bead:
+4. Create your first bead:
    bd create "First task"
 
-4. Dispatch work to supervisors:
+5. Dispatch work to supervisors:
    Task(subagent_type="<supervisor-name>", prompt="BEAD_ID: BD-001\\n\\nImplement...")
 
 NOTE: All agents (scout, detective, architect, etc.) run via Claude Task().
@@ -897,7 +1047,10 @@ Next steps:
 
 1. Restart Claude Code to load new hooks and agents
 
-2. **REQUIRED: Run discovery to create supervisors**
+2. (Optional) If you enabled Mux integration, restart your Mux workspace session
+   so .mux/init/.mux/tool_post/.mux/tool_env and .mux/AGENTS.md are loaded.
+
+3. **REQUIRED: Run discovery to create supervisors**
    Discovery will scan your codebase and fetch specialist agents:
 
    Task(
@@ -911,10 +1064,10 @@ Next steps:
    - Inject beads workflow at the beginning of each agent
    - Write supervisors to .claude/agents/
 
-3. Create your first bead:
+4. Create your first bead:
    bd create "First task"
 
-4. Dispatch work to supervisors:
+5. Dispatch work to supervisors:
    Task(subagent_type="<supervisor-name>", prompt="BEAD_ID: BD-001\\n\\nImplement...")
 
 NOTE: Read-only agents (scout, detective, architect, scribe, code-reviewer)
@@ -923,6 +1076,41 @@ Supervisors are sourced from https://github.com/ayush-that/sub-agents.directory
 with beads workflow injected.
 """)
 
+
+
+
+def run_mux_init_if_present(project_dir: Path, enabled: bool) -> None:
+    """Run .mux/init after bootstrap when Mux integration is enabled."""
+    if not enabled:
+        return
+
+    mux_init = project_dir / ".mux" / "init"
+    if not mux_init.exists():
+        print("\n[MUX] Skipping .mux/init (not found)")
+        return
+
+    print("\n[MUX] Running .mux/init...")
+    result = subprocess.run(
+        [str(mux_init)],
+        cwd=project_dir,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode == 0:
+        print("  - .mux/init completed successfully")
+    else:
+        print(f"  - WARNING: .mux/init exited with code {result.returncode}")
+
+    if result.stdout:
+        print("  - stdout:")
+        for line in result.stdout.strip().splitlines():
+            print(f"    {line}")
+
+    if result.stderr:
+        print("  - stderr:")
+        for line in result.stderr.strip().splitlines():
+            print(f"    {line}")
 
 if __name__ == "__main__":
     main()

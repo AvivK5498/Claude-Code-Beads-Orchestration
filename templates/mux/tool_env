@@ -1,0 +1,3 @@
+# Mux tool_env (sourced before bash tool calls)
+# Ensure bd installed in ~/bin is discoverable.
+export PATH="$HOME/bin:$PATH"

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Mux workspace init hook
+# Runs once when a workspace is created.
+
+if command -v bd >/dev/null 2>&1; then
+  bd prime --stealth >/dev/null 2>&1 || true
+elif [ -x "$HOME/bin/bd" ]; then
+  "$HOME/bin/bd" prime --stealth >/dev/null 2>&1 || true
+fi

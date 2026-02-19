@@ -1,6 +1,7 @@
 ---
 name: react-best-practices
 description: React and Next.js performance optimization patterns. Use BEFORE implementing any React code to ensure best practices are followed.
+advertise: true
 ---
 
 # React Best Practices
