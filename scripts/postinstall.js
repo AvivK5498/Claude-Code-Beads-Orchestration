@@ -15,39 +15,30 @@ const sourceSkillDir = path.join(packageDir, 'skills', SKILL_NAME);
 
 console.log('\n📦 Installing beads-orchestration skill...\n');
 
-// Create ~/.claude/skills/create-beads-orchestration/
 try {
+  // Create ~/.claude/skills/create-beads-orchestration/
   fs.mkdirSync(claudeSkillsDir, { recursive: true });
-} catch (err) {
-  console.error(`❌ Failed to create directory: ${claudeSkillsDir}`);
-  console.error(err.message);
-  process.exit(1);
-}
 
-// Copy SKILL.md
-const sourceFile = path.join(sourceSkillDir, 'SKILL.md');
-const destFile = path.join(claudeSkillsDir, 'SKILL.md');
+  // Copy SKILL.md
+  const sourceFile = path.join(sourceSkillDir, 'SKILL.md');
+  const destFile = path.join(claudeSkillsDir, 'SKILL.md');
 
-try {
   if (!fs.existsSync(sourceFile)) {
-    console.error(`❌ Source skill not found: ${sourceFile}`);
-    process.exit(1);
+    console.warn(`⚠️  Source skill not found: ${sourceFile}`);
+    console.warn('   You can run bootstrap manually: npx beads-orchestration bootstrap');
+  } else {
+    fs.copyFileSync(sourceFile, destFile);
+    console.log(`✅ Installed skill to: ${claudeSkillsDir}`);
   }
 
-  fs.copyFileSync(sourceFile, destFile);
-  console.log(`✅ Installed skill to: ${claudeSkillsDir}`);
-} catch (err) {
-  console.error(`❌ Failed to copy skill: ${err.message}`);
-  process.exit(1);
-}
-
-// Save package location for bootstrap.py
-const configFile = path.join(claudeDir, 'beads-orchestration-path.txt');
-try {
+  // Save package location for bootstrap.py
+  const configFile = path.join(claudeDir, 'beads-orchestration-path.txt');
   fs.writeFileSync(configFile, packageDir);
   console.log(`✅ Saved package path to: ${configFile}`);
 } catch (err) {
-  console.error(`⚠️  Could not save package path: ${err.message}`);
+  // Graceful fallback — postinstall failure should not block npm install
+  console.warn(`⚠️  Postinstall could not complete: ${err.message}`);
+  console.warn('   You can run bootstrap manually: npx beads-orchestration bootstrap');
 }
 
 console.log(`

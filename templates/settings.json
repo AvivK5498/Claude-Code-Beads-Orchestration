@@ -2,17 +2,9 @@
   "hooks": {
     "PreToolUse": [
       {
-        "hooks": [
-          {"type": "command", "command": "node .claude/hooks/block-orchestrator-tools.cjs"}
-        ]
-      },
-      {
         "matcher": "Task",
         "hooks": [
-          {"type": "command", "command": "node .claude/hooks/enforce-bead-for-supervisor.cjs"},
-          {"type": "command", "command": "node .claude/hooks/enforce-sequential-dispatch.cjs"},
-          {"type": "command", "command": "node .claude/hooks/remind-inprogress.cjs"},
-          {"type": "command", "command": "node .claude/hooks/inject-discipline-reminder.cjs"}
+          {"type": "command", "command": "node .claude/hooks/task-pre-use.cjs"}
         ]
       },
       {
@@ -30,7 +22,19 @@
       {
         "matcher": "Bash",
         "hooks": [
-          {"type": "command", "command": "node .claude/hooks/validate-epic-close.cjs"}
+          {"type": "command", "command": "node .claude/hooks/bash-guard.cjs"}
+        ]
+      },
+      {
+        "matcher": "NotebookEdit",
+        "hooks": [
+          {"type": "command", "command": "node .claude/hooks/block-notebook-edit.cjs"}
+        ]
+      },
+      {
+        "matcher": "mcp__provider_delegator__invoke_agent",
+        "hooks": [
+          {"type": "command", "command": "node .claude/hooks/validate-provider-agent.cjs"}
         ]
       }
     ],
@@ -38,8 +42,7 @@
       {
         "matcher": "Task",
         "hooks": [
-          {"type": "command", "command": "node .claude/hooks/enforce-concise-response.cjs"},
-          {"type": "command", "command": "node .claude/hooks/log-dispatch-prompt.cjs", "timeout": 10}
+          {"type": "command", "command": "node .claude/hooks/task-post-use.cjs", "timeout": 10}
         ]
       },
       {

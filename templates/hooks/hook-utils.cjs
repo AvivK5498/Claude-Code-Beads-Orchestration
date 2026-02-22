@@ -201,6 +201,38 @@ function containsPathSegment(filePath, segment) {
 }
 
 // ---------------------------------------------------------------------------
+// Subagent detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Detect whether the current tool call originates from a subagent.
+ * Subagents get full tool access — orchestrator restrictions don't apply.
+ *
+ * Checks transcript_path + tool_use_id against the subagents directory.
+ * Returns false on any error (fail-open: treat as orchestrator).
+ */
+function isSubagent(input) {
+  const transcriptPath = getField(input, 'transcript_path');
+  const toolUseId = getField(input, 'tool_use_id');
+  if (!transcriptPath || !toolUseId) return false;
+
+  const sessionDir = transcriptPath.replace(/\.jsonl$/, '');
+  const subagentsDir = path.join(sessionDir, 'subagents');
+
+  try {
+    const files = fs.readdirSync(subagentsDir)
+      .filter(f => f.startsWith('agent-') && f.endsWith('.jsonl'));
+    for (const f of files) {
+      const content = fs.readFileSync(path.join(subagentsDir, f), 'utf8');
+      if (content.includes(`"id":"${toolUseId}"`)) return true;
+    }
+  } catch {
+    // No subagents dir or read error — treat as orchestrator
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // Error logging
 // ---------------------------------------------------------------------------
 
@@ -260,6 +292,7 @@ module.exports = {
   parseBeadId,
   parseEpicId,
   containsPathSegment,
+  isSubagent,
   logError,
   runHook,
 };
