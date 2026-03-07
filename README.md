@@ -44,7 +44,7 @@ Constraints over instructions. What's blocked can't be ignored.
 
 This project started as a fork of [The Claude Protocol](https://github.com/AvivK5498/The-Claude-Protocol) by Aviv Kaplan. The original author appears to have stopped development — PRs go unreviewed, and the underlying tools (beads CLI, Claude Code hooks API) have changed significantly.
 
-v3 is a ground-up rewrite. Different architecture, different philosophy. See [decisions.md](docs/decisions.md) for full rationale.
+v3 is a ground-up rewrite. Different architecture, different philosophy. See [decisions.md](docs/decisions-en.md) for full rationale.
 
 ## What Changed in v3
 
@@ -71,7 +71,7 @@ Stripped everything that doesn't improve output. Added everything that does.
 - Knowledge base search is mandatory before every investigation
 - Dev rules (implementation, logging, TDD) included by default
 
-Full details: [docs/decisions.md](docs/decisions.md)
+Full details: [docs/decisions-en.md](docs/decisions-en.md)
 
 ## How It Works
 
