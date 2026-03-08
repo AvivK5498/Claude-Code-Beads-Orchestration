@@ -19,9 +19,9 @@
    cd "$WORKTREE_PATH"
    ```
 
-3. **Mark in progress:**
+3. **Mark active status:**
    ```bash
-   bd update {BEAD_ID} --status in_progress
+   bd update {BEAD_ID} --status "${BEADS_ACTIVE_STATUS:-in_progress}"
    ```
 
 4. **Read bead comments for investigation context:**
@@ -82,9 +82,9 @@ WARNING: You will be BLOCKED if you skip any step. Execute ALL in order:
    bd comment {BEAD_ID} "Completed: [summary]"
    ```
 
-5. **Mark status:**
+5. **Mark review-ready status:**
    ```bash
-   bd update {BEAD_ID} --status inreview
+   bd update {BEAD_ID} --status "${BEADS_REVIEW_STATUS:-inreview}"
    ```
 
 6. **Return completion report:**

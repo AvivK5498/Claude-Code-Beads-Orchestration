@@ -8,6 +8,25 @@ AGENT_TRANSCRIPT=$(echo "$INPUT" | jq -r '.agent_transcript_path // empty')
 MAIN_TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty')
 AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // empty')
 
+normalize_status() {
+  local value="$1"
+  value="${value//-/_}"
+  echo "$value" | tr '[:upper:]' '[:lower:]' | xargs
+}
+
+status_in_csv() {
+  local status
+  status="$(normalize_status "$1")"
+  local csv="$2"
+  IFS=',' read -ra items <<< "$csv"
+  for item in "${items[@]}"; do
+    if [[ -n "$(normalize_status "$item")" && "$status" == "$(normalize_status "$item")" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 [[ -z "$AGENT_TRANSCRIPT" || ! -f "$AGENT_TRANSCRIPT" ]] && echo '{"decision":"approve"}' && exit 0
 
 # Extract last assistant text response
@@ -107,11 +126,11 @@ fi
 
 # Check 6: Bead status
 BEAD_STATUS=$(bd show "$BEAD_ID_FROM_RESPONSE" --json 2>/dev/null | jq -r '.[0].status // "unknown"')
-EXPECTED_STATUS="inreview"
-# Epic children also use inreview (done status not supported in bd)
-if [[ "$BEAD_STATUS" != "$EXPECTED_STATUS" ]]; then
+EXPECTED_STATUSES="${BEADS_REVIEW_STATUSES:-${BEADS_REVIEW_STATUS:-inreview}}"
+# Configure via BEADS_REVIEW_STATUS or BEADS_REVIEW_STATUSES.
+if ! status_in_csv "$BEAD_STATUS" "$EXPECTED_STATUSES"; then
   cat << EOF
-{"decision":"block","reason":"Work verification failed: bead status is '${BEAD_STATUS}'.\n\nRun: bd update ${BEAD_ID_FROM_RESPONSE} --status ${EXPECTED_STATUS}"}
+{"decision":"block","reason":"Work verification failed: bead status is '${BEAD_STATUS}'.\n\nExpected one of: ${EXPECTED_STATUSES}\nRun: bd update ${BEAD_ID_FROM_RESPONSE} --status <review-status>"}
 EOF
   exit 0
 fi

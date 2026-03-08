@@ -6,6 +6,7 @@
 set -euo pipefail
 
 TOOL_INPUT="${CLAUDE_TOOL_INPUT:-}"
+COMPLETE_STATUSES="${BEADS_COMPLETE_STATUSES:-done,closed}"
 
 # Only check Bash commands containing "bd close"
 if ! echo "$TOOL_INPUT" | jq -e '.command' >/dev/null 2>&1; then
@@ -64,18 +65,28 @@ if [ "$ISSUE_TYPE" != "epic" ]; then
 fi
 
 # This is an epic - check if all children are complete
-INCOMPLETE=$(bd list --json 2>/dev/null | jq -r --arg epic "$CLOSE_ID" '
-  [.[] | select((.id | startswith($epic + ".")) and .status != "done" and .status != "closed")] | length
+INCOMPLETE=$(bd list --json 2>/dev/null | jq -r --arg epic "$CLOSE_ID" --arg statuses "$COMPLETE_STATUSES" '
+  def normalize: ascii_downcase | gsub("-"; "_");
+  def in_statuses($csv):
+    (normalize) as $s
+    | ($csv | split(",") | map(gsub("^\\s+|\\s+$"; "") | normalize))
+    | index($s) != null;
+  [.[] | select((.id | startswith($epic + ".")) and ((.status // "") | in_statuses($statuses) | not))] | length
 ' 2>/dev/null || echo "0")
 
 if [ "$INCOMPLETE" != "0" ] && [ "$INCOMPLETE" != "" ]; then
   # Get list of incomplete children for the error message
-  INCOMPLETE_LIST=$(bd list --json 2>/dev/null | jq -r --arg epic "$CLOSE_ID" '
-    [.[] | select((.id | startswith($epic + ".")) and .status != "done" and .status != "closed")] | .[] | "\(.id) (\(.status))"
+  INCOMPLETE_LIST=$(bd list --json 2>/dev/null | jq -r --arg epic "$CLOSE_ID" --arg statuses "$COMPLETE_STATUSES" '
+    def normalize: ascii_downcase | gsub("-"; "_");
+    def in_statuses($csv):
+      (normalize) as $s
+      | ($csv | split(",") | map(gsub("^\\s+|\\s+$"; "") | normalize))
+      | index($s) != null;
+    [.[] | select((.id | startswith($epic + ".")) and ((.status // "") | in_statuses($statuses) | not))] | .[] | "\(.id) (\(.status))"
   ' 2>/dev/null | tr '\n' ', ' | sed 's/,$//')
 
   cat << EOF
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Cannot close epic '$CLOSE_ID' - has $INCOMPLETE incomplete children: $INCOMPLETE_LIST. Mark all children as done first."}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Cannot close epic '$CLOSE_ID' - has $INCOMPLETE incomplete children: $INCOMPLETE_LIST. Mark all children as complete first (allowed: $COMPLETE_STATUSES)."}}
 EOF
   exit 0
 fi

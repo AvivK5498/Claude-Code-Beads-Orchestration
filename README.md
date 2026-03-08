@@ -174,6 +174,28 @@ CLAUDE.md             # Orchestrator instructions
 
 ---
 
+## Status Model Configuration
+
+The protocol supports custom kanban/status vocabularies. Configure with environment variables:
+
+```bash
+# Worker active status used in reminders/docs/session-start
+export BEADS_ACTIVE_STATUS="working"
+
+# Review-ready status enforced by SubagentStop
+export BEADS_REVIEW_STATUS="ready_for_review"
+
+# Child statuses considered complete for epic close validation
+export BEADS_COMPLETE_STATUSES="ready_for_review,done,closed"
+
+# Statuses that cannot be redispatched
+export BEADS_TERMINAL_STATUSES="closed,cancelled"
+```
+
+Defaults remain backward compatible (`in_progress`, `inreview`, `done/closed`).
+
+---
+
 ## Advanced: External Providers
 
 By default, all agents run via Claude's Task(). To delegate read-only agents (scout, detective, etc.) to Codex/Gemini:

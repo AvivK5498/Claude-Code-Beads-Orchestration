@@ -63,10 +63,20 @@ echo ""
 echo "## Task Status"
 echo ""
 
-# Show in-progress beads first (highest priority)
-IN_PROGRESS=$(bd list --status in_progress 2>/dev/null | head -5)
+# Show active beads first (highest priority).
+# Configure with BEADS_ACTIVE_STATUSES (comma-separated) or BEADS_ACTIVE_STATUS (single).
+ACTIVE_STATUSES="${BEADS_ACTIVE_STATUSES:-${BEADS_ACTIVE_STATUS:-in_progress}}"
+ACTIVE_ITEMS=""
+IFS=',' read -ra ACTIVE_STATUS_LIST <<< "$ACTIVE_STATUSES"
+for STATUS in "${ACTIVE_STATUS_LIST[@]}"; do
+  CLEAN_STATUS=$(echo "$STATUS" | xargs)
+  [[ -z "$CLEAN_STATUS" ]] && continue
+  MATCHES=$(bd list --status "$CLEAN_STATUS" 2>/dev/null | head -5)
+  [[ -n "$MATCHES" ]] && ACTIVE_ITEMS+="${MATCHES}"$'\n'
+done
+IN_PROGRESS=$(echo "$ACTIVE_ITEMS" | awk 'NF && !seen[$0]++' | head -5)
 if [[ -n "$IN_PROGRESS" ]]; then
-  echo "### In Progress (resume these):"
+  echo "### Active (resume these):"
   echo "$IN_PROGRESS"
   echo ""
 fi

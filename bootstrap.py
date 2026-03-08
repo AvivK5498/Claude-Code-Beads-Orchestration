@@ -312,19 +312,21 @@ def install_beads(project_dir: Path, claude_only: bool = False) -> bool:
     else:
         print("  - .beads already exists")
 
-    # Configure custom 'inreview' status for parallel work workflow
+    # Configure review status for completion workflow (customizable)
+    review_status = os.environ.get("BEADS_REVIEW_STATUS", "inreview").strip()
     if shutil.which("bd"):
-        print("  - Configuring custom 'inreview' status...")
-        result = subprocess.run(
-            ["bd", "config", "set", "status.custom", "inreview"],
-            cwd=project_dir,
-            capture_output=True,
-            text=True
-        )
-        if result.returncode == 0:
-            print("  - Added 'inreview' custom status")
-        else:
-            print(f"  - Warning: Could not add custom status: {result.stderr}")
+        if review_status:
+            print(f"  - Configuring review status '{review_status}'...")
+            result = subprocess.run(
+                ["bd", "config", "set", "status.custom", review_status],
+                cwd=project_dir,
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0:
+                print(f"  - Added '{review_status}' custom status")
+            else:
+                print(f"  - Warning: Could not add custom status: {result.stderr}")
 
     print("  DONE: beads setup complete")
     return True

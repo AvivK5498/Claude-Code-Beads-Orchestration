@@ -24,7 +24,7 @@ tools:
 ## Phase 0: Start
 
 ```
-1. If BEAD_ID provided: `bd update {BEAD_ID} --status in_progress`
+1. If BEAD_ID provided: `bd update {BEAD_ID} --status ${BEADS_ACTIVE_STATUS:-in_progress}`
 2. Verify: `git status` shows merge in progress
 3. Both branches readable: can access HEAD and MERGE_HEAD
 ```

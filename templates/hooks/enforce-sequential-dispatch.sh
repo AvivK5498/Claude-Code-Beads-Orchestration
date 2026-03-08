@@ -10,6 +10,28 @@
 INPUT=$(cat)
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty')
 
+TERMINAL_STATUSES="${BEADS_TERMINAL_STATUSES:-closed,done}"
+RESOLVED_BLOCKER_STATUSES="${BEADS_RESOLVED_BLOCKER_STATUSES:-done,closed}"
+
+normalize_status() {
+  local value="$1"
+  value="${value//-/_}"
+  echo "$value" | tr '[:upper:]' '[:lower:]' | xargs
+}
+
+status_in_csv() {
+  local status
+  status="$(normalize_status "$1")"
+  local csv="$2"
+  IFS=',' read -ra items <<< "$csv"
+  for item in "${items[@]}"; do
+    if [[ -n "$(normalize_status "$item")" && "$status" == "$(normalize_status "$item")" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 [[ "$TOOL_NAME" != "Task" ]] && exit 0
 
 SUBAGENT_TYPE=$(echo "$INPUT" | jq -r '.tool_input.subagent_type // empty')
@@ -25,9 +47,9 @@ PROMPT=$(echo "$INPUT" | jq -r '.tool_input.prompt // empty')
 BEAD_ID=$(echo "$PROMPT" | grep -oE "BEAD_ID: [A-Za-z0-9._-]+" | head -1 | sed 's/BEAD_ID: //')
 [[ -z "$BEAD_ID" ]] && exit 0
 
-# Block dispatch to closed/done beads - create a new bead instead
+# Block dispatch to terminal beads - create a new bead instead
 BEAD_STATUS=$(bd show "$BEAD_ID" --json 2>/dev/null | jq -r '.[0].status // empty')
-if [[ "$BEAD_STATUS" == "closed" || "$BEAD_STATUS" == "done" ]]; then
+if status_in_csv "$BEAD_STATUS" "$TERMINAL_STATUSES"; then
   cat << EOF
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"<closed-bead>\nBead ${BEAD_ID} is already ${BEAD_STATUS}. Do not reopen closed beads.\n\nCreate a new bead for follow-up work and relate it:\n\n  bd create \"Fix: [description]\" -d \"Follow-up to ${BEAD_ID}: [details]\"\n  # Returns: {NEW_ID}\n  bd dep relate {NEW_ID} ${BEAD_ID}\n\nThen dispatch with the NEW bead ID.\n</closed-bead>"}}
 EOF
@@ -40,7 +62,14 @@ if [[ "$BEAD_ID" == *"."* ]]; then
   EPIC_ID=$(echo "$BEAD_ID" | sed 's/\.[0-9]*$//')
 
   # Check for unresolved blockers (exclude parent epic - it's not a real blocker)
-  BLOCKERS=$(bd dep list "$BEAD_ID" --json 2>/dev/null | jq -r --arg epic "$EPIC_ID" '.[] | select(.id != $epic and .status != "done" and .status != "closed") | .id' 2>/dev/null | tr '\n' ', ' | sed 's/,$//')
+  BLOCKERS=$(bd dep list "$BEAD_ID" --json 2>/dev/null | jq -r --arg epic "$EPIC_ID" --arg statuses "$RESOLVED_BLOCKER_STATUSES" '
+    def normalize: ascii_downcase | gsub("-"; "_");
+    def in_statuses($csv):
+      (normalize) as $s
+      | ($csv | split(",") | map(gsub("^\\s+|\\s+$"; "") | normalize))
+      | index($s) != null;
+    .[] | select(.id != $epic and ((.status // "") | in_statuses($statuses) | not)) | .id
+  ' 2>/dev/null | tr '\n' ', ' | sed 's/,$//')
 
   if [[ -n "$BLOCKERS" ]]; then
     cat << EOF

@@ -3,7 +3,7 @@
 <CRITICAL-REQUIREMENT>
 You MUST run BOTH review skills on ALL modified component files BEFORE marking the task as complete.
 
-This is NOT optional. Before marking `inreview`:
+This is NOT optional. Before marking your review-ready status (`${BEADS_REVIEW_STATUS:-inreview}` by default):
 
 ### 1. RAMS Accessibility Review
 
@@ -36,7 +36,7 @@ Skill(skill="web-interface-guidelines")
 ### Workflow
 
 ```
-Implement → Run tests → Run RAMS → Run web-interface-guidelines → Fix issues → Mark inreview
+Implement → Run tests → Run RAMS → Run web-interface-guidelines → Fix issues → Mark review-ready
 ```
 
 ### 3. Document Results on Bead
@@ -50,7 +50,7 @@ This creates an audit trail and confirms you read and acted on the results.
 
 ### Completion Checklist
 
-Before marking `inreview`, verify:
+Before marking review-ready, verify:
 - [ ] RAMS review completed on all modified components
 - [ ] Web Interface Guidelines review completed
 - [ ] CRITICAL accessibility issues fixed

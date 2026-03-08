@@ -173,6 +173,28 @@ MOCKBD
     "incomplete children"
 }
 
+# ---- Test 7: Epic with custom complete statuses ----
+test_epic_custom_complete_statuses() {
+  setup_mock_dir
+  cat > "$MOCK_DIR/bd" << 'MOCKBD'
+#!/bin/bash
+if [ "$1" = "show" ] && [ "$3" = "--json" ]; then
+  echo '[{"id":"BD-040","issue_type":"epic","status":"active"}]'
+elif [ "$1" = "list" ] && [ "$2" = "--json" ]; then
+  echo '[
+    {"id":"BD-040","issue_type":"epic","status":"active"},
+    {"id":"BD-040.1","issue_type":"task","status":"qa_done"},
+    {"id":"BD-040.2","issue_type":"task","status":"archived"}
+  ]'
+fi
+MOCKBD
+  chmod +x "$MOCK_DIR/bd"
+
+  export BEADS_COMPLETE_STATUSES="qa_done,archived"
+  assert_allowed "Epic with custom complete statuses is allowed" '{"command":"bd close BD-040"}'
+  unset BEADS_COMPLETE_STATUSES
+}
+
 # ---- Run all tests ----
 echo "=== validate-epic-close.sh tests ==="
 echo ""
@@ -183,6 +205,7 @@ test_standalone_task
 test_epic_all_done
 test_epic_children_inreview
 test_epic_mixed_statuses
+test_epic_custom_complete_statuses
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

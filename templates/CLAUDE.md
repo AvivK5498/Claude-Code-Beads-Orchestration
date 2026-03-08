@@ -102,10 +102,16 @@ bd create "Title" -d "..." --parent {ID} --deps {ID}  # Child with dependency
 bd list                                               # List beads
 bd show ID                                            # Details
 bd ready                                              # Unblocked tasks
-bd update ID --status inreview                        # Mark done
+bd update ID --status ${BEADS_REVIEW_STATUS:-inreview} # Mark review-ready
 bd close ID                                           # Close
 bd dep relate {NEW_ID} {OLD_ID}                       # Link related beads
 ```
+
+Status model is configurable via environment variables:
+- `BEADS_ACTIVE_STATUS` (default: `in_progress`)
+- `BEADS_REVIEW_STATUS` (default: `inreview`)
+- `BEADS_COMPLETE_STATUSES` (default: `done,closed`)
+- `BEADS_TERMINAL_STATUSES` (default: `closed,done`)
 
 ## When to Use Standalone or Epic
 
@@ -153,4 +159,3 @@ ORCHESTRATOR: Update this section as the project evolves.
 Include: active work, recent decisions, known issues, architectural notes.
 Keep it concise — pointers to files are better than duplicated content.
 -->
-
