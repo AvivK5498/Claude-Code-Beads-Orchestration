@@ -149,6 +149,7 @@ Restart Claude Code. Run `/project-discovery`.
 | `--project-dir PATH` | Target directory (default: current) |
 | `--project-name NAME` | Project name for CLAUDE.md (auto-inferred from package.json / pyproject.toml / Cargo.toml / go.mod) |
 | `--no-rules` | Skip dev rules (implementation, logging, TDD, resilience) |
+| `--lang en\|ru` | Language for dev rules (default: en) |
 
 ### Local development (before npm publish)
 
@@ -215,7 +216,7 @@ Subagents are blocked from finishing unless:
 
 ## Dev Rules
 
-Included by default. Skip with `--no-rules`.
+Included by default. Skip with `--no-rules`. Russian version: `npx claude-protocol init --lang ru`.
 
 | Rule | What it does |
 |------|-------------|

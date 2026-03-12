@@ -11,7 +11,7 @@
 <br>
 
 ```bash
-npx claude-protocol init
+npx claude-protocol init --lang ru
 ```
 
 <br>
@@ -137,7 +137,7 @@ CLAUDE.md                   # Инструкции оркестратора
 ### Установить
 
 ```bash
-npx claude-protocol init
+npx claude-protocol init --lang ru
 ```
 
 Перезапустите Claude Code. Выполните `/project-discovery`.
@@ -149,12 +149,13 @@ npx claude-protocol init
 | `--project-dir PATH` | Целевая директория (по умолчанию: текущая) |
 | `--project-name NAME` | Имя проекта для CLAUDE.md (автоопределяется из package.json / pyproject.toml / Cargo.toml / go.mod) |
 | `--no-rules` | Пропустить dev-правила (implementation, logging, TDD, resilience) |
+| `--lang en\|ru` | Язык dev-правил (по умолчанию: en) |
 
 ### Локальная разработка (до публикации в npm)
 
 ```bash
 cd /path/to/claude-protocol && npm link
-npx claude-protocol init  # работает в любом проекте
+npx claude-protocol init --lang ru  # работает в любом проекте
 ```
 
 ## Workflow
@@ -215,7 +216,7 @@ git checkout -b fix-typo     # обязательно не main
 
 ## Dev-правила
 
-Включены по умолчанию. Пропустить: `--no-rules`.
+Включены по умолчанию. Пропустить: `--no-rules`. На русском: `npx claude-protocol init --lang ru`.
 
 | Правило | Что делает |
 |---------|------------|
