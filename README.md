@@ -63,7 +63,7 @@ Stripped everything that doesn't improve output. Added everything that does.
 - Mandatory size check — automatic decision: single bead or epic with children
 - Plan-to-beads requirement — all planned tasks must be created as beads before implementation starts
 - LEARNED quality enforcement — specific format: problem → solution → context
-- Safe merge into existing projects — CLAUDE.md appended, settings.json hooks merged, nothing overwritten
+- Safe install and upgrade — SHA-256 manifest tracks user modifications, `--force` for clean reinstall
 - bd command reference in rules — prevents Claude from inventing nonexistent commands
 
 **Changed:**
@@ -92,15 +92,22 @@ Full details: [docs/decisions-en.md](docs/decisions-en.md)
   skills/
     project-discovery/      # Extracts project conventions
   settings.json             # Hook configuration
+  .manifest.json            # File hashes for safe upgrades
 CLAUDE.md                   # Orchestrator instructions
 .beads/                     # Task database + knowledge base
 ```
 
-### Safe for existing projects
+### Safe for existing projects — and for upgrades
 
-- **CLAUDE.md** — if it exists, beads section is appended. Original content preserved.
-- **settings.json** — hooks are merged by event type. Your existing hooks stay.
+First install and re-install use the same command: `npx claude-protocol init`.
+
+- **Hooks and skills** — always updated to the latest version (enforcement code).
+- **Rules and agents** — updated only if you haven't modified them. Modified files are preserved; the new version is saved to `.claude/.upgrades/` for manual review.
+- **CLAUDE.md** — beads section appended if missing. Original content preserved.
+- **settings.json** — hooks merged by event type. Your existing hooks stay.
 - **.gitignore** — missing entries appended. Nothing removed.
+
+Use `--force` to overwrite all files regardless of modifications.
 
 ### What happens at session start
 
@@ -150,6 +157,7 @@ Restart Claude Code. Run `/project-discovery`.
 | `--project-name NAME` | Project name for CLAUDE.md (auto-inferred from package.json / pyproject.toml / Cargo.toml / go.mod) |
 | `--no-rules` | Skip dev rules (implementation, logging, TDD, resilience) |
 | `--lang en\|ru` | Language for dev rules (default: en) |
+| `--force` | Overwrite all files, including user-modified (for clean reinstall) |
 
 ### Local development (before npm publish)
 
@@ -236,8 +244,8 @@ A: Restart Claude Code. Hooks load from `settings.json` at startup.
 **Q: Claude invents commands like `bd export`.**
 A: `beads-workflow.md` includes a full command reference table. If Claude still invents commands, it didn't read the rules — check that `.claude/rules/` exists.
 
-**Q: Will this overwrite my CLAUDE.md?**
-A: No. If CLAUDE.md exists, beads section is appended with a separator. Original content stays.
+**Q: What happens if I run `init` again after updating claude-protocol?**
+A: Modified rules and agents are preserved — new versions go to `.claude/.upgrades/` for you to review. Hooks and skills are always updated. Use `--force` for a clean reinstall.
 
 **Q: Can I use this without Dolt?**
 A: Yes. Beads works with SQLite by default. Dolt adds version history and branching for the task database.
