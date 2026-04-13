@@ -1,4 +1,4 @@
-"""Tests for bootstrap.py — project name inference, copy_and_replace, setup_gitignore."""
+"""Tests for bootstrap.py — project name inference, copy_and_replace, setup_gitignore, manifest."""
 
 import json
 import sys
@@ -17,6 +17,12 @@ from bootstrap import (
     _from_pyproject,
     _from_cargo,
     _from_go_mod,
+    file_sha256,
+    content_sha256,
+    load_manifest,
+    save_manifest,
+    should_update_file,
+    save_upgrade,
     TEMPLATES_DIR,
 )
 
@@ -260,3 +266,143 @@ class TestTemplatesDir:
 
     def test_has_beads_workflow_rule(self):
         assert (TEMPLATES_DIR / "rules" / "beads-workflow.md").exists()
+
+
+# ============================================================================
+# Manifest functions
+# ============================================================================
+
+class TestFileSha256:
+    def test_returns_sha256_prefixed_hash(self, tmp_path):
+        f = tmp_path / "test.txt"
+        f.write_text("hello world")
+        result = file_sha256(f)
+        assert result.startswith("sha256:")
+        assert len(result) == 7 + 64  # "sha256:" + 64 hex chars
+
+    def test_same_content_same_hash(self, tmp_path):
+        f1 = tmp_path / "a.txt"
+        f2 = tmp_path / "b.txt"
+        f1.write_text("identical")
+        f2.write_text("identical")
+        assert file_sha256(f1) == file_sha256(f2)
+
+    def test_different_content_different_hash(self, tmp_path):
+        f1 = tmp_path / "a.txt"
+        f2 = tmp_path / "b.txt"
+        f1.write_text("content A")
+        f2.write_text("content B")
+        assert file_sha256(f1) != file_sha256(f2)
+
+
+class TestContentSha256:
+    def test_matches_file_sha256(self, tmp_path):
+        text = "hello world"
+        f = tmp_path / "test.txt"
+        f.write_text(text, encoding="utf-8")
+        assert content_sha256(text) == file_sha256(f)
+
+
+class TestLoadManifest:
+    def test_returns_empty_when_no_manifest(self, tmp_path):
+        m = load_manifest(tmp_path)
+        assert m["version"] is None
+        assert m["files"] == {}
+
+    def test_reads_existing_manifest(self, tmp_path):
+        manifest_dir = tmp_path / ".claude"
+        manifest_dir.mkdir()
+        data = {"version": "3.1.0", "installed_at": "2026-01-01", "files": {"a": "sha256:abc"}}
+        (manifest_dir / ".manifest.json").write_text(json.dumps(data))
+        m = load_manifest(tmp_path)
+        assert m["version"] == "3.1.0"
+        assert m["files"]["a"] == "sha256:abc"
+
+    def test_returns_empty_on_corrupt_json(self, tmp_path):
+        manifest_dir = tmp_path / ".claude"
+        manifest_dir.mkdir()
+        (manifest_dir / ".manifest.json").write_text("not json {{{")
+        m = load_manifest(tmp_path)
+        assert m["files"] == {}
+
+
+class TestSaveManifest:
+    def test_creates_manifest_file(self, tmp_path):
+        data = {"version": "3.2.0", "installed_at": "now", "files": {"x": "sha256:123"}}
+        save_manifest(tmp_path, data)
+        path = tmp_path / ".claude" / ".manifest.json"
+        assert path.exists()
+        loaded = json.loads(path.read_text())
+        assert loaded["version"] == "3.2.0"
+        assert loaded["files"]["x"] == "sha256:123"
+
+    def test_overwrites_existing_manifest(self, tmp_path):
+        save_manifest(tmp_path, {"version": "1", "installed_at": "", "files": {}})
+        save_manifest(tmp_path, {"version": "2", "installed_at": "", "files": {"a": "b"}})
+        loaded = json.loads((tmp_path / ".claude" / ".manifest.json").read_text())
+        assert loaded["version"] == "2"
+
+
+class TestShouldUpdateFile:
+    def test_new_file(self, tmp_path):
+        f = tmp_path / "new.md"
+        ok, reason = should_update_file(f, "rules/new.md", {"files": {}}, False)
+        assert ok is True
+        assert reason == "new"
+
+    def test_unchanged_file(self, tmp_path):
+        f = tmp_path / "rule.md"
+        f.write_text("original content", encoding="utf-8")
+        h = file_sha256(f)
+        manifest = {"files": {"rules/rule.md": h}}
+        ok, reason = should_update_file(f, "rules/rule.md", manifest, False)
+        assert ok is True
+        assert reason == "unchanged"
+
+    def test_modified_file(self, tmp_path):
+        f = tmp_path / "rule.md"
+        f.write_text("original content", encoding="utf-8")
+        h = file_sha256(f)
+        manifest = {"files": {"rules/rule.md": h}}
+        # User modifies the file
+        f.write_text("user modified content", encoding="utf-8")
+        ok, reason = should_update_file(f, "rules/rule.md", manifest, False)
+        assert ok is False
+        assert reason == "modified"
+
+    def test_force_overrides_modified(self, tmp_path):
+        f = tmp_path / "rule.md"
+        f.write_text("user modified", encoding="utf-8")
+        manifest = {"files": {"rules/rule.md": "sha256:old"}}
+        ok, reason = should_update_file(f, "rules/rule.md", manifest, True)
+        assert ok is True
+        assert reason == "forced"
+
+    def test_legacy_install_no_manifest_entry(self, tmp_path):
+        f = tmp_path / "rule.md"
+        f.write_text("some content", encoding="utf-8")
+        manifest = {"files": {}}
+        ok, reason = should_update_file(f, "rules/rule.md", manifest, False)
+        assert ok is False
+        assert reason == "no_manifest"
+
+    def test_force_overrides_legacy(self, tmp_path):
+        f = tmp_path / "rule.md"
+        f.write_text("some content", encoding="utf-8")
+        manifest = {"files": {}}
+        ok, reason = should_update_file(f, "rules/rule.md", manifest, True)
+        assert ok is True
+        assert reason == "forced"
+
+
+class TestSaveUpgrade:
+    def test_saves_to_upgrades_dir(self, tmp_path):
+        save_upgrade(tmp_path, "rules/beads-workflow.md", "new content")
+        dest = tmp_path / ".claude" / ".upgrades" / "rules" / "beads-workflow.md"
+        assert dest.exists()
+        assert dest.read_text() == "new content"
+
+    def test_creates_nested_dirs(self, tmp_path):
+        save_upgrade(tmp_path, "agents/code-reviewer.md", "v2 content")
+        dest = tmp_path / ".claude" / ".upgrades" / "agents" / "code-reviewer.md"
+        assert dest.exists()

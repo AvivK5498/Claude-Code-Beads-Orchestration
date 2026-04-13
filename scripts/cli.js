@@ -24,6 +24,7 @@ Options:
   --project-dir    Project directory (default: current)
   --no-rules       Skip dev rules (implementation, logging, TDD)
   --lang <en|ru>   Language for dev rules (default: en)
+  --force          Overwrite all files regardless of user modifications
 
 Examples:
   claude-protocol init
