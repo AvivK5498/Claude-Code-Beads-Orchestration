@@ -24,6 +24,7 @@
 **Шаг 2: Создание beads:**
 - Одиночная задача: `bd create "Task" -d "..."`
 - Epic: `bd create "Feature" -d "..." --type epic`, затем дети с `--parent` и `--deps`
+- Полный список значений `--type` (task, bug, feature, epic, spike, story, milestone, ...): `bd create --help`
 - Проверь: `bd list` — план теперь живёт в beads, а не только в контексте
 
 **Шаг 3: Только теперь начинай работу** с `bd ready` → dispatch

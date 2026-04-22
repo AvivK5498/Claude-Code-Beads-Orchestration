@@ -24,6 +24,7 @@ Rule of thumb: 1 bead = 1 PR = 1 reviewable diff.
 **Step 2: Create beads:**
 - Single task: `bd create "Task" -d "..."`
 - Epic: `bd create "Feature" -d "..." --type epic`, then children with `--parent` and `--deps`
+- Full list of `--type` values (task, bug, feature, epic, spike, story, milestone, ...): `bd create --help`
 - Verify: `bd list` — the plan now lives in beads, not just in context
 
 **Step 3: Only then start work** with `bd ready` → dispatch

@@ -33,7 +33,7 @@
 
 Use when: multiple files/domains, "first X then Y", DB + API + frontend.
 
-1. `bd create "Feature" -d "..." --type epic` → {EPIC_ID}
+1. `bd create "Feature" -d "..." --type epic` → {EPIC_ID} (full `--type` list: `bd create --help`)
 2. Create children with `--parent {EPIC_ID}` and `--deps` for ordering
 3. `bd ready` → dispatch ALL unblocked children in parallel
 4. Repeat as children complete
