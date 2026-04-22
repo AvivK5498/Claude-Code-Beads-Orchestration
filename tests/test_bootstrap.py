@@ -26,6 +26,9 @@ from bootstrap import (
     save_upgrade,
     cleanup_obsolete,
     run_bd_doctor,
+    _auto_inject_legacy_files,
+    _memory_dir_should_skip,
+    _cleanup_empty_local_settings,
     TEMPLATES_DIR,
 )
 
@@ -462,12 +465,18 @@ class TestCleanupObsolete:
         assert backup_file.read_text() == "obsolete content"
 
     def test_skips_non_manifest_file(self, tmp_path, monkeypatch):
-        """File in OBSOLETE_FILES but NOT in manifest → not touched (user-created)."""
-        monkeypatch.setattr(bootstrap, "OBSOLETE_FILES", ["user.txt"])
+        """A user file NOT listed in OBSOLETE_FILES and not in manifest → untouched.
+
+        The safety guarantee is: files not enumerated in OBSOLETE_FILES are never
+        inspected. Auto-inject only fires on OBSOLETE_FILES entries; paths outside
+        that list remain fully protected regardless of manifest state.
+        """
+        monkeypatch.setattr(bootstrap, "OBSOLETE_FILES", ["some/obsolete.txt"])
         monkeypatch.setattr(bootstrap, "OBSOLETE_DIRS", [])
         monkeypatch.setattr(bootstrap, "OBSOLETE_SETTINGS_HOOKS", [])
         monkeypatch.setattr(bootstrap, "OBSOLETE_LOCAL_SETTINGS_PATTERNS", [])
 
+        # This file is NOT in OBSOLETE_FILES — cleanup must not even look at it.
         target = tmp_path / "user.txt"
         target.write_text("user file, not ours")
         manifest = {"files": {}}
@@ -647,6 +656,196 @@ class TestCleanupObsolete:
             if external_dir.exists():
                 import shutil as _sh
                 _sh.rmtree(external_dir)
+
+
+# ============================================================================
+# bd-3 logic: legacy auto-inject, knowledge.jsonl guard, empty-settings cleanup
+# ============================================================================
+
+class TestBd3Logic:
+    # --- _auto_inject_legacy_files --------------------------------------
+
+    def test_auto_inject_legacy_files_adds_existing_unmanaged(self, tmp_path, monkeypatch):
+        """File exists on disk, not in manifest → injected with sentinel hash."""
+        monkeypatch.setattr(bootstrap, "OBSOLETE_FILES", [".claude/hooks/memory-capture.cjs"])
+        target = tmp_path / ".claude" / "hooks" / "memory-capture.cjs"
+        target.parent.mkdir(parents=True)
+        target.write_text("// legacy")
+        manifest = {"files": {}}
+
+        injected = _auto_inject_legacy_files(tmp_path, manifest, dry_run=False)
+
+        assert injected == [".claude/hooks/memory-capture.cjs"]
+        assert manifest["files"][".claude/hooks/memory-capture.cjs"] == "sha256:legacy-auto-injected"
+
+    def test_auto_inject_legacy_files_skips_missing(self, tmp_path, monkeypatch):
+        """Path not on disk → not injected."""
+        monkeypatch.setattr(bootstrap, "OBSOLETE_FILES", [".claude/hooks/memory-capture.cjs"])
+        manifest = {"files": {}}
+
+        injected = _auto_inject_legacy_files(tmp_path, manifest, dry_run=False)
+
+        assert injected == []
+        assert manifest["files"] == {}
+
+    def test_auto_inject_legacy_files_skips_already_in_manifest(self, tmp_path, monkeypatch):
+        """Path already a manifest key → not touched."""
+        monkeypatch.setattr(bootstrap, "OBSOLETE_FILES", [".claude/hooks/memory-capture.cjs"])
+        target = tmp_path / ".claude" / "hooks" / "memory-capture.cjs"
+        target.parent.mkdir(parents=True)
+        target.write_text("// legacy")
+        manifest = {"files": {".claude/hooks/memory-capture.cjs": "sha256:real-hash"}}
+
+        injected = _auto_inject_legacy_files(tmp_path, manifest, dry_run=False)
+
+        assert injected == []
+        # Original hash preserved
+        assert manifest["files"][".claude/hooks/memory-capture.cjs"] == "sha256:real-hash"
+
+    def test_auto_inject_dry_run_does_not_mutate(self, tmp_path, monkeypatch):
+        """dry_run=True → manifest unchanged, but result still reports what would be injected."""
+        monkeypatch.setattr(bootstrap, "OBSOLETE_FILES", [".claude/hooks/memory-capture.cjs"])
+        target = tmp_path / ".claude" / "hooks" / "memory-capture.cjs"
+        target.parent.mkdir(parents=True)
+        target.write_text("// legacy")
+        manifest = {"files": {}}
+
+        injected = _auto_inject_legacy_files(tmp_path, manifest, dry_run=True)
+
+        assert injected == [".claude/hooks/memory-capture.cjs"]
+        assert manifest["files"] == {}
+
+    # --- _memory_dir_should_skip ----------------------------------------
+
+    def test_memory_dir_skipped_if_knowledge_nonempty(self, tmp_path, monkeypatch):
+        """Non-empty knowledge.jsonl → .beads/memory preserved, report.skipped_dirs populated."""
+        monkeypatch.setattr(bootstrap, "OBSOLETE_FILES", [])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_DIRS", [".beads/memory"])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_SETTINGS_HOOKS", [])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_LOCAL_SETTINGS_PATTERNS", [])
+
+        mem_dir = tmp_path / ".beads" / "memory"
+        mem_dir.mkdir(parents=True)
+        (mem_dir / "knowledge.jsonl").write_text("data\n")
+        manifest = {"files": {}}
+
+        report = cleanup_obsolete(tmp_path, manifest, dry_run=False)
+
+        assert mem_dir.exists()
+        assert (mem_dir / "knowledge.jsonl").exists()
+        assert report["removed_dirs"] == []
+        assert len(report["skipped_dirs"]) == 1
+        rel, reason = report["skipped_dirs"][0]
+        assert rel == ".beads/memory"
+        assert "knowledge.jsonl" in reason
+
+    def test_memory_dir_removed_if_knowledge_empty(self, tmp_path, monkeypatch):
+        """Empty (0-byte) knowledge.jsonl → dir removed normally."""
+        monkeypatch.setattr(bootstrap, "OBSOLETE_FILES", [])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_DIRS", [".beads/memory"])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_SETTINGS_HOOKS", [])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_LOCAL_SETTINGS_PATTERNS", [])
+
+        mem_dir = tmp_path / ".beads" / "memory"
+        mem_dir.mkdir(parents=True)
+        (mem_dir / "knowledge.jsonl").write_text("")
+        manifest = {"files": {}}
+
+        report = cleanup_obsolete(tmp_path, manifest, dry_run=False)
+
+        assert not mem_dir.exists()
+        assert ".beads/memory" in report["removed_dirs"]
+        assert report["skipped_dirs"] == []
+
+    def test_memory_dir_removed_if_knowledge_missing(self, tmp_path, monkeypatch):
+        """No knowledge.jsonl at all → dir removed normally."""
+        monkeypatch.setattr(bootstrap, "OBSOLETE_FILES", [])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_DIRS", [".beads/memory"])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_SETTINGS_HOOKS", [])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_LOCAL_SETTINGS_PATTERNS", [])
+
+        mem_dir = tmp_path / ".beads" / "memory"
+        mem_dir.mkdir(parents=True)
+        (mem_dir / "filler.cjs").write_text("// other")
+        manifest = {"files": {}}
+
+        report = cleanup_obsolete(tmp_path, manifest, dry_run=False)
+
+        assert not mem_dir.exists()
+        assert ".beads/memory" in report["removed_dirs"]
+        assert report["skipped_dirs"] == []
+
+    # --- _cleanup_empty_local_settings ----------------------------------
+
+    def test_cleanup_empty_local_settings_removes_file(self, tmp_path, monkeypatch):
+        """settings.local.json with only empty hook lists → file deleted."""
+        monkeypatch.setattr(bootstrap, "OBSOLETE_FILES", [])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_DIRS", [])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_SETTINGS_HOOKS", [])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_LOCAL_SETTINGS_PATTERNS", [])
+
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        settings = claude_dir / "settings.local.json"
+        settings.write_text(json.dumps({"hooks": {"SessionStart": []}}))
+        manifest = {"files": {}}
+
+        report = cleanup_obsolete(tmp_path, manifest, dry_run=False)
+
+        assert not settings.exists()
+        assert report["removed_local_settings"] is True
+        # Backup was made
+        backup_root = Path(report["backups"][0])
+        assert (backup_root / "obsolete" / ".claude" / "settings.local.json").exists()
+
+    def test_cleanup_empty_local_settings_keeps_if_other_hooks(self, tmp_path, monkeypatch):
+        """settings.local.json still has real hook entries → file kept."""
+        monkeypatch.setattr(bootstrap, "OBSOLETE_FILES", [])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_DIRS", [])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_SETTINGS_HOOKS", [])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_LOCAL_SETTINGS_PATTERNS", [])
+
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        settings = claude_dir / "settings.local.json"
+        settings.write_text(json.dumps({
+            "hooks": {
+                "SessionStart": [
+                    {"matcher": "*", "hooks": [{"type": "command", "command": "echo hi"}]},
+                ]
+            }
+        }))
+        manifest = {"files": {}}
+
+        report = cleanup_obsolete(tmp_path, manifest, dry_run=False)
+
+        assert settings.exists()
+        assert report["removed_local_settings"] is False
+
+    def test_cleanup_empty_local_settings_dry_run(self, tmp_path, monkeypatch):
+        """dry_run=True → report says True but file untouched."""
+        monkeypatch.setattr(bootstrap, "OBSOLETE_FILES", [])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_DIRS", [])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_SETTINGS_HOOKS", [])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_LOCAL_SETTINGS_PATTERNS", [])
+
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        settings = claude_dir / "settings.local.json"
+        settings.write_text(json.dumps({"hooks": {"SessionStart": []}}))
+        manifest = {"files": {}}
+
+        report = cleanup_obsolete(tmp_path, manifest, dry_run=True)
+
+        assert settings.exists()
+        assert report["removed_local_settings"] is True
+
+    def test_cleanup_empty_local_settings_missing_file(self, tmp_path):
+        """File absent → no-op, helper returns False."""
+        result = _cleanup_empty_local_settings(
+            tmp_path, lambda: tmp_path / ".bk", dry_run=False,
+        )
+        assert result is False
 
 
 # ============================================================================

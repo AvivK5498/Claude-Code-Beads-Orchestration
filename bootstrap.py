@@ -37,27 +37,43 @@ TEMPLATES_DIR = SCRIPT_DIR / "templates"
 
 
 # ============================================================================
-# OBSOLETE ITEMS (filled by bd-3 per release; empty here)
+# OBSOLETE ITEMS (per-release cleanup targets)
 # ============================================================================
+# v3.3.0 removes the memory-capture / recall.cjs knowledge-base system.
+# Pre-manifest installs have these paths on disk but no manifest entry;
+# _auto_inject_legacy_files retro-registers them before _cleanup_file runs.
 
 # File paths relative to project_dir. Removed by cleanup_obsolete() ONLY IF
 # the path is a key in manifest["files"] (i.e. we installed it — never touch
 # user-created files). Backed up before deletion.
-OBSOLETE_FILES: list[str] = []
+OBSOLETE_FILES: list[str] = [
+    ".claude/hooks/memory-capture.cjs",
+    ".claude/hooks/recall.cjs",
+    ".beads/memory/recall.cjs",
+]
 
-# Directory paths relative to project_dir. Removed entirely if they exist
-# (no manifest check — directories aren't tracked individually). Always
-# backed up before deletion.
-OBSOLETE_DIRS: list[str] = []
+# Directory paths relative to project_dir. Removed if they exist (no manifest
+# check — directories aren't tracked individually). Always backed up before
+# deletion. NOTE: .beads/memory is skipped if a non-empty knowledge.jsonl is
+# still present — user data is preserved, warning printed.
+OBSOLETE_DIRS: list[str] = [
+    ".beads/memory",
+]
 
 # Substrings matched against hook command strings in .claude/settings.json.
 # Any hook entry whose "hooks[0].command" contains one of these substrings
 # is stripped. Original settings.json is backed up before writing.
-OBSOLETE_SETTINGS_HOOKS: list[str] = []
+OBSOLETE_SETTINGS_HOOKS: list[str] = [
+    "memory-capture.cjs",
+]
 
 # Substrings matched against hook command strings in
 # .claude/settings.local.json. Same semantics as OBSOLETE_SETTINGS_HOOKS.
-OBSOLETE_LOCAL_SETTINGS_PATTERNS: list[str] = []
+# `bd prime` used to be a SessionStart hook there; the templated global
+# settings.json now owns session bootstrapping, so legacy local entries go.
+OBSOLETE_LOCAL_SETTINGS_PATTERNS: list[str] = [
+    "bd prime",
+]
 
 
 # ============================================================================
@@ -306,6 +322,61 @@ def _is_within(child: Path, root: Path) -> bool:
     return c == r or r in c.parents
 
 
+def _auto_inject_legacy_files(project_dir: Path, manifest: dict,
+                              dry_run: bool) -> list:
+    """Register OBSOLETE_FILES that exist on disk but pre-date the manifest."""
+    injected: list = []
+    existing = manifest.get("files", {})
+    for rel in OBSOLETE_FILES:
+        target = project_dir / rel
+        if rel in existing:
+            continue
+        if not target.exists() or not _is_within(target, project_dir):
+            continue
+        if not dry_run:
+            manifest.setdefault("files", {})[rel] = "sha256:legacy-auto-injected"
+        injected.append(rel)
+    return injected
+
+
+def _memory_dir_should_skip(project_dir: Path) -> tuple:
+    """Skip `.beads/memory` removal if knowledge.jsonl has user LEARNED data."""
+    knowledge = project_dir / ".beads" / "memory" / "knowledge.jsonl"
+    try:
+        if knowledge.exists() and knowledge.stat().st_size > 0:
+            return True, f"knowledge.jsonl contains {knowledge.stat().st_size} bytes of LEARNED data — preserved for manual review"
+    except Exception:
+        return False, ""
+    return False, ""
+
+
+def _cleanup_empty_local_settings(project_dir: Path, backup_fn,
+                                  dry_run: bool) -> bool:
+    """Delete .claude/settings.local.json if no real hook entries remain."""
+    path = project_dir / ".claude" / "settings.local.json"
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if data == {}:
+        empty = True
+    elif list(data.keys()) == ["hooks"] and isinstance(data.get("hooks"), dict):
+        empty = all(isinstance(v, list) and not v for v in data["hooks"].values())
+    else:
+        empty = False
+    if not empty:
+        return False
+    if dry_run:
+        return True
+    backup_path = backup_fn() / ".claude" / "settings.local.json"
+    backup_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(path, backup_path)
+    path.unlink()
+    return True
+
+
 def _cleanup_file(rel: str, project_dir: Path, manifest: dict,
                   backup_fn, dry_run: bool) -> bool:
     """Remove one obsolete file (manifest-gated). Returns True if it was listed."""
@@ -370,16 +441,21 @@ def cleanup_obsolete(project_dir: Path, manifest: dict, dry_run: bool) -> dict:
     """Remove obsolete files/dirs and strip obsolete settings hook entries.
 
     Safety rules:
-    - File is removed only if its relative path is a manifest["files"] key.
-    - Directories are removed unconditionally if they exist.
+    - File is removed only if its relative path is a manifest["files"] key
+      (legacy installs get pre-registered via _auto_inject_legacy_files).
+    - Directories are removed if they exist, except .beads/memory which is
+      preserved when knowledge.jsonl still has user LEARNED data.
     - Every removal is backed up into .claude/.upgrades/<timestamp>/obsolete/<rel>.
     - Settings files are backed up before editing.
+    - settings.local.json is removed outright if stripping leaves it with no
+      real hook entries.
     - dry_run=True → compute report, touch nothing on disk.
     - manifest is mutated in place; caller is responsible for save_manifest.
     """
     report = {
-        "removed_files": [], "removed_dirs": [],
+        "removed_files": [], "removed_dirs": [], "skipped_dirs": [],
         "stripped_settings_hooks": [], "stripped_local_patterns": [],
+        "removed_local_settings": False, "legacy_injected": [],
         "backups": [None],
     }
 
@@ -394,13 +470,22 @@ def cleanup_obsolete(project_dir: Path, manifest: dict, dry_run: bool) -> dict:
             report["backups"][0] = str(upgrades_root)
         return obsolete_backup
 
+    report["legacy_injected"] = _auto_inject_legacy_files(
+        project_dir, manifest, dry_run,
+    )
+    # For accurate dry-run preview, register legacy files in manifest temporarily
+    # so _cleanup_file's safety gate allows them through. Rolled back after loop.
+    dry_run_injected = report["legacy_injected"] if dry_run else []
+    for rel in dry_run_injected:
+        manifest.setdefault("files", {})[rel] = "sha256:legacy-auto-injected"
+
     for rel in OBSOLETE_FILES:
         if _cleanup_file(rel, project_dir, manifest, backup_fn, dry_run):
             report["removed_files"].append(rel)
 
-    for rel in OBSOLETE_DIRS:
-        if _cleanup_dir(rel, project_dir, manifest, backup_fn, dry_run):
-            report["removed_dirs"].append(rel)
+    # Roll back the dry-run temporary injection so the caller's manifest is pristine.
+    for rel in dry_run_injected:
+        manifest.get("files", {}).pop(rel, None)
 
     report["stripped_settings_hooks"] = _cleanup_settings(
         project_dir / ".claude" / "settings.json",
@@ -410,6 +495,19 @@ def cleanup_obsolete(project_dir: Path, manifest: dict, dry_run: bool) -> dict:
         project_dir / ".claude" / "settings.local.json",
         OBSOLETE_LOCAL_SETTINGS_PATTERNS, backup_fn, dry_run,
     )
+    report["removed_local_settings"] = _cleanup_empty_local_settings(
+        project_dir, backup_fn, dry_run,
+    )
+
+    for rel in OBSOLETE_DIRS:
+        if rel == ".beads/memory":
+            skip, reason = _memory_dir_should_skip(project_dir)
+            if skip:
+                print(f"[UPGRADE] Skipping .beads/memory/: {reason}")
+                report["skipped_dirs"].append((rel, reason))
+                continue
+        if _cleanup_dir(rel, project_dir, manifest, backup_fn, dry_run):
+            report["removed_dirs"].append(rel)
     return report
 
 
@@ -693,24 +791,29 @@ def _print_cleanup_report(report: dict, dry_run: bool) -> None:
     """Print a [UPGRADE] Cleanup: block from cleanup_obsolete report."""
     prefix = "[DRY-RUN] " if dry_run else ""
     print("\n[UPGRADE] Cleanup:")
-    if report["removed_files"]:
-        for rel in report["removed_files"]:
-            print(f"  {prefix}removed file: {rel}")
-    if report["removed_dirs"]:
-        for rel in report["removed_dirs"]:
-            print(f"  {prefix}removed dir:  {rel}")
-    if report["stripped_settings_hooks"]:
-        for cmd in report["stripped_settings_hooks"]:
-            print(f"  {prefix}stripped settings hook: {cmd}")
-    if report["stripped_local_patterns"]:
-        for cmd in report["stripped_local_patterns"]:
-            print(f"  {prefix}stripped local hook:    {cmd}")
+    for rel in report.get("legacy_injected", []):
+        print(f"  {prefix}auto-injected legacy file into manifest: {rel}")
+    for rel in report["removed_files"]:
+        print(f"  {prefix}removed file: {rel}")
+    for rel in report["removed_dirs"]:
+        print(f"  {prefix}removed dir:  {rel}")
+    for rel, reason in report.get("skipped_dirs", []):
+        print(f"  {prefix}skipped dir:  {rel} ({reason})")
+    for cmd in report["stripped_settings_hooks"]:
+        print(f"  {prefix}stripped settings hook: {cmd}")
+    for cmd in report["stripped_local_patterns"]:
+        print(f"  {prefix}stripped local hook:    {cmd}")
+    if report.get("removed_local_settings"):
+        print(f"  {prefix}removed file: .claude/settings.local.json (no hooks left)")
     backup = report["backups"][0]
     if backup:
         print(f"  backup: {backup}")
     if not any([
         report["removed_files"], report["removed_dirs"],
+        report.get("skipped_dirs"),
         report["stripped_settings_hooks"], report["stripped_local_patterns"],
+        report.get("removed_local_settings"),
+        report.get("legacy_injected"),
     ]):
         print("  nothing to clean")
 
