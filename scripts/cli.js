@@ -1,55 +1,92 @@
 #!/usr/bin/env node
 
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const path = require('path');
-const fs = require('fs');
 
 const args = process.argv.slice(2);
 const command = args[0];
-
 const packageDir = path.dirname(__dirname);
 const bootstrapScript = path.join(packageDir, 'bootstrap.py');
 
 function showHelp() {
   console.log(`
-beads-orchestration - Multi-agent orchestration for Claude Code
+claude-protocol - Enforcement-first orchestration for Claude Code
 
 Usage:
-  beads-orchestration <command> [options]
+  claude-protocol <command> [options]
 
 Commands:
-  install          Run postinstall to copy skill to ~/.claude/
-  bootstrap        Run bootstrap.py directly (advanced)
-  help             Show this help message
+  init          Install into current project (beads, agents, hooks, rules, skills)
+  upgrade       Re-run init and clean up obsolete artifacts (safe for existing installs)
+  help          Show this help message
+
+Options:
+  --project-name   Project name (auto-inferred if not provided)
+  --project-dir    Project directory (default: current)
+  --no-rules       Skip dev rules (implementation, logging, TDD)
+  --lang <en|ru>   Language for dev rules (default: en)
+  --force          Overwrite all files regardless of user modifications
+  --dry-run        Preview changes without writing (upgrade only)
+  --all <parent>   Batch upgrade: iterate subdirs of <parent> with .beads/ (upgrade only)
 
 Examples:
-  beads-orchestration install
-  beads-orchestration bootstrap --project-dir /path/to/project --claude-only
-
-After installing, use /create-beads-orchestration in Claude Code.
+  claude-protocol init
+  claude-protocol init --lang ru
+  claude-protocol init --project-dir /path/to/project
+  claude-protocol init --no-rules
+  claude-protocol upgrade
+  claude-protocol upgrade --dry-run
+  claude-protocol upgrade --all /path/to/parent-dir
 `);
 }
 
-function runInstall() {
-  const postinstall = path.join(__dirname, 'postinstall.js');
-  require(postinstall);
+function pythonCmd() {
+  return process.platform === 'win32' ? 'python' : 'python3';
 }
 
-function runBootstrap() {
-  const bootstrapArgs = args.slice(1).join(' ');
+function normalizeRulesFlag(bootstrapArgs) {
+  // --with-rules by default, unless --no-rules is specified
+  if (!bootstrapArgs.includes('--no-rules')) {
+    if (!bootstrapArgs.includes('--with-rules')) {
+      bootstrapArgs.push('--with-rules');
+    }
+  } else {
+    // Remove --no-rules (bootstrap.py doesn't know this flag)
+    const idx = bootstrapArgs.indexOf('--no-rules');
+    bootstrapArgs.splice(idx, 1);
+  }
+  return bootstrapArgs;
+}
+
+function runInstall() {
+  const bootstrapArgs = normalizeRulesFlag(args.slice(1));
   try {
-    execSync(`python3 "${bootstrapScript}" ${bootstrapArgs}`, { stdio: 'inherit' });
+    execFileSync(pythonCmd(), [bootstrapScript, ...bootstrapArgs], { stdio: 'inherit' });
+  } catch (err) {
+    process.exit(err.status || 1);
+  }
+}
+
+function runUpgrade() {
+  const bootstrapArgs = normalizeRulesFlag(args.slice(1));
+  // Auto-append --upgrade only if user didn't pass it — avoids duplicate flags.
+  if (!bootstrapArgs.includes('--upgrade')) {
+    bootstrapArgs.push('--upgrade');
+  }
+  try {
+    execFileSync(pythonCmd(), [bootstrapScript, ...bootstrapArgs], { stdio: 'inherit' });
   } catch (err) {
     process.exit(err.status || 1);
   }
 }
 
 switch (command) {
+  case 'init':
   case 'install':
     runInstall();
     break;
-  case 'bootstrap':
-    runBootstrap();
+  case 'upgrade':
+    runUpgrade();
     break;
   case 'help':
   case '--help':

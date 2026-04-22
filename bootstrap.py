@@ -4,46 +4,76 @@ Bootstrap script for beads-based orchestration.
 
 Creates:
 - .beads/ directory with beads CLI
-- .claude/agents/ with agent templates (copied, not generated)
-- .claude/hooks/ with hook scripts
+- .claude/agents/ with code-reviewer and merge-supervisor
+- .claude/hooks/ with enforcement hooks (Node.js)
+- .claude/rules/ with beads-workflow and optional dev rules
+- .claude/skills/ with project-discovery
 - .claude/settings.json with hook configuration
-- .mcp.json with provider-delegator configuration (only with --external-providers)
+- .claude/.manifest.json with file hashes for safe upgrades
+- .claude/.upgrades/ with new versions of user-modified files
+- CLAUDE.md with orchestrator instructions
 
 Usage:
-    python bootstrap.py [--project-name NAME] [--project-dir DIR] [--with-kanban-ui]
-
-Modes:
-    Default: All agents use Claude Task() directly (claude-only)
-    --external-providers: Sets up provider_delegator MCP for Codex/Gemini delegation
+    python bootstrap.py [--project-name NAME] [--project-dir DIR] [--with-rules] [--force]
 """
 
 import os
 import sys
 import json
+import hashlib
 import shutil
-import stat
 import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+
 try:
     import tomllib
 except ImportError:
     tomllib = None
-from pathlib import Path
-from datetime import datetime
-import random
 
-# Get the directory where this script lives (lean-orchestration repo)
+_SHELL = sys.platform == "win32"
 SCRIPT_DIR = Path(__file__).parent.resolve()
 TEMPLATES_DIR = SCRIPT_DIR / "templates"
 
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
 
-CORE_AGENTS = ["scout", "detective", "architect", "scribe", "discovery", "merge-supervisor", "code-reviewer"]
+# ============================================================================
+# OBSOLETE ITEMS (per-release cleanup targets)
+# ============================================================================
+# v3.3.0 removes the memory-capture / recall.cjs knowledge-base system.
+# Pre-manifest installs have these paths on disk but no manifest entry;
+# _auto_inject_legacy_files retro-registers them before _cleanup_file runs.
 
-# NOTE: Supervisors are NOT bootstrapped - they are created dynamically by the
-# discovery agent which fetches specialists from the external agents directory
-# and injects the beads workflow.
+# File paths relative to project_dir. Removed by cleanup_obsolete() ONLY IF
+# the path is a key in manifest["files"] (i.e. we installed it — never touch
+# user-created files). Backed up before deletion.
+OBSOLETE_FILES: list[str] = [
+    ".claude/hooks/memory-capture.cjs",
+    ".claude/hooks/recall.cjs",
+    ".beads/memory/recall.cjs",
+]
+
+# Directory paths relative to project_dir. Removed if they exist (no manifest
+# check — directories aren't tracked individually). Always backed up before
+# deletion. NOTE: .beads/memory is skipped if a non-empty knowledge.jsonl is
+# still present — user data is preserved, warning printed.
+OBSOLETE_DIRS: list[str] = [
+    ".beads/memory",
+]
+
+# Substrings matched against hook command strings in .claude/settings.json.
+# Any hook entry whose "hooks[0].command" contains one of these substrings
+# is stripped. Original settings.json is backed up before writing.
+OBSOLETE_SETTINGS_HOOKS: list[str] = [
+    "memory-capture.cjs",
+]
+
+# Substrings matched against hook command strings in
+# .claude/settings.local.json. Same semantics as OBSOLETE_SETTINGS_HOOKS.
+# `bd prime` used to be a SessionStart hook there; the templated global
+# settings.json now owns session bootstrapping, so legacy local entries go.
+OBSOLETE_LOCAL_SETTINGS_PATTERNS: list[str] = [
+    "bd prime",
+]
 
 
 # ============================================================================
@@ -52,876 +82,891 @@ CORE_AGENTS = ["scout", "detective", "architect", "scribe", "discovery", "merge-
 
 def infer_project_name(project_dir: Path) -> str:
     """Auto-infer project name from package files or directory name."""
-
-    # Try package.json (Node.js)
-    package_json = project_dir / "package.json"
-    if package_json.exists():
-        try:
-            data = json.loads(package_json.read_text())
-            if name := data.get("name"):
-                return name.replace("-", " ").replace("_", " ").title()
-        except (json.JSONDecodeError, KeyError):
-            pass
-
-    # Try pyproject.toml (Python)
-    if tomllib:
-        pyproject = project_dir / "pyproject.toml"
-        if pyproject.exists():
-            try:
-                data = tomllib.loads(pyproject.read_text())
-                if name := data.get("project", {}).get("name"):
-                    return name.replace("-", " ").replace("_", " ").title()
-                if name := data.get("tool", {}).get("poetry", {}).get("name"):
-                    return name.replace("-", " ").replace("_", " ").title()
-            except Exception:
-                pass
-
-        # Try Cargo.toml (Rust)
-        cargo = project_dir / "Cargo.toml"
-        if cargo.exists():
-            try:
-                data = tomllib.loads(cargo.read_text())
-                if name := data.get("package", {}).get("name"):
-                    return name.replace("-", " ").replace("_", " ").title()
-            except Exception:
-                pass
-
-    # Try go.mod (Go)
-    go_mod = project_dir / "go.mod"
-    if go_mod.exists():
-        try:
-            content = go_mod.read_text()
-            for line in content.splitlines():
-                if line.startswith("module "):
-                    module_path = line.split()[1]
-                    name = module_path.split("/")[-1]
-                    return name.replace("-", " ").replace("_", " ").title()
-        except Exception:
-            pass
-
-    # Fallback to directory name
+    for detect_fn in [_from_package_json, _from_pyproject, _from_cargo, _from_go_mod]:
+        name = detect_fn(project_dir)
+        if name:
+            return name
     return project_dir.name.replace("-", " ").replace("_", " ").title()
 
 
-# ============================================================================
-# PLACEHOLDER REPLACEMENT
-# ============================================================================
+def _from_package_json(project_dir: Path) -> str | None:
+    p = project_dir / "package.json"
+    if not p.exists():
+        return None
+    try:
+        name = json.loads(p.read_text(encoding='utf-8')).get("name")
+        return name.replace("-", " ").replace("_", " ").title() if name else None
+    except Exception:
+        return None
 
-def replace_placeholders(content: str, replacements: dict) -> str:
-    """Replace all placeholders in content."""
-    for placeholder, value in replacements.items():
-        content = content.replace(placeholder, value)
-    return content
 
+def _from_pyproject(project_dir: Path) -> str | None:
+    if not tomllib:
+        return None
+    p = project_dir / "pyproject.toml"
+    if not p.exists():
+        return None
+    try:
+        data = tomllib.loads(p.read_text(encoding='utf-8'))
+        name = data.get("project", {}).get("name") or data.get("tool", {}).get("poetry", {}).get("name")
+        return name.replace("-", " ").replace("_", " ").title() if name else None
+    except Exception:
+        return None
+
+
+def _from_cargo(project_dir: Path) -> str | None:
+    if not tomllib:
+        return None
+    p = project_dir / "Cargo.toml"
+    if not p.exists():
+        return None
+    try:
+        name = tomllib.loads(p.read_text(encoding='utf-8')).get("package", {}).get("name")
+        return name.replace("-", " ").replace("_", " ").title() if name else None
+    except Exception:
+        return None
+
+
+def _from_go_mod(project_dir: Path) -> str | None:
+    p = project_dir / "go.mod"
+    if not p.exists():
+        return None
+    try:
+        for line in p.read_text(encoding='utf-8').splitlines():
+            if line.startswith("module "):
+                name = line.split()[1].split("/")[-1]
+                return name.replace("-", " ").replace("_", " ").title()
+    except Exception:
+        pass
+    return None
+
+
+# ============================================================================
+# HELPERS
+# ============================================================================
 
 def copy_and_replace(source: Path, dest: Path, replacements: dict) -> None:
-    """Copy file and replace placeholders."""
-    content = source.read_text()
-    updated = replace_placeholders(content, replacements)
+    content = source.read_text(encoding='utf-8')
+    for placeholder, value in replacements.items():
+        content = content.replace(placeholder, value)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(updated)
-
-    # Preserve executable permissions for shell scripts
-    if source.suffix == '.sh':
-        dest.chmod(dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    dest.write_text(content, encoding='utf-8')
 
 
 # ============================================================================
-# CODEX DELEGATOR SETUP (SHARED LOCATION)
+# MANIFEST (upgrade tracking)
 # ============================================================================
 
-# Shared location for provider-delegator (installed once, used by all projects)
-SHARED_MCP_DIR = Path.home() / ".claude" / "mcp-servers" / "provider-delegator"
+def file_sha256(path: Path) -> str:
+    """Return hex SHA-256 digest of a file's contents."""
+    h = hashlib.sha256()
+    h.update(path.read_bytes())
+    return f"sha256:{h.hexdigest()}"
 
 
-def setup_provider_delegator() -> Path:
-    """Set up provider-delegator in shared location (~/.claude/mcp-servers/provider-delegator/).
+def content_sha256(content: str) -> str:
+    """Return hex SHA-256 digest of string content."""
+    h = hashlib.sha256()
+    h.update(content.encode("utf-8"))
+    return f"sha256:{h.hexdigest()}"
 
-    This installs once and is reused by all projects.
-    Returns path to venv python.
+
+def load_manifest(project_dir: Path) -> dict:
+    """Load .claude/.manifest.json or return empty structure."""
+    manifest_path = project_dir / ".claude" / ".manifest.json"
+    if manifest_path.exists():
+        try:
+            return json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"version": None, "installed_at": None, "files": {}}
+
+
+def save_manifest(project_dir: Path, manifest: dict) -> None:
+    """Write .claude/.manifest.json."""
+    manifest_path = project_dir / ".claude" / ".manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+    )
+
+
+def should_update_file(
+    file_path: Path, relative_key: str, manifest: dict, force: bool
+) -> tuple:
+    """Decide whether to overwrite a file.
+
+    Returns (should_update: bool, reason: str) where reason is one of:
+    "new", "unchanged", "modified", "forced", "no_manifest".
     """
-    print("\n[0/8] Setting up provider-delegator (shared)...")
+    if force:
+        return True, "forced"
+    if not file_path.exists():
+        return True, "new"
+    current_hash = file_sha256(file_path)
+    recorded_hash = manifest.get("files", {}).get(relative_key)
+    if recorded_hash is None:
+        # Legacy install — treat as user-modified (safe default)
+        return False, "no_manifest"
+    if current_hash == recorded_hash:
+        return True, "unchanged"
+    return False, "modified"
 
-    source_dir = SCRIPT_DIR / "mcp-provider-delegator"
-    venv_dir = SHARED_MCP_DIR / ".venv"
-    venv_python = venv_dir / "bin" / "python"
 
-    # Check if already installed in shared location
-    if venv_python.exists():
-        print(f"  - Already installed at {SHARED_MCP_DIR}")
-        return venv_python
+def save_upgrade(project_dir: Path, relative_path: str, content: str) -> None:
+    """Save new version of a user-modified file to .claude/.upgrades/."""
+    dest = project_dir / ".claude" / ".upgrades" / relative_path
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(content, encoding="utf-8")
 
-    # Verify source exists
-    if not source_dir.exists():
-        print(f"  ERROR: mcp-provider-delegator not found at {source_dir}")
-        print("  Make sure you cloned the full lean-orchestration repo")
-        return None
 
-    # Check if uv is available
-    if not shutil.which("uv"):
-        print("  ERROR: 'uv' not found. Install with: curl -LsSf https://astral.sh/uv/install.sh | sh")
-        return None
+# ============================================================================
+# UPGRADE CLEANUP
+# ============================================================================
 
-    # Create shared directory
-    print(f"  - Installing to {SHARED_MCP_DIR}")
-    SHARED_MCP_DIR.mkdir(parents=True, exist_ok=True)
+def _upgrade_timestamp() -> str:
+    """YYYYMMDDTHHMMSSZ — one folder per cleanup_obsolete call."""
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
-    # Copy source to shared location
-    print("  - Copying source files...")
-    for item in source_dir.iterdir():
-        if item.name == ".venv":
-            continue  # Skip any existing venv in source
-        dest = SHARED_MCP_DIR / item.name
-        if item.is_dir():
-            if dest.exists():
-                shutil.rmtree(dest)
-            shutil.copytree(item, dest)
+
+def _hook_command_matches(hook_entry: dict, patterns: list) -> tuple:
+    """Return (command_str, matched) for a hook entry dict.
+
+    Tolerant of malformed entries — returns ("", False) on any structural error.
+    """
+    try:
+        cmd = hook_entry.get("hooks", [{}])[0].get("command", "") or ""
+    except Exception:
+        return "", False
+    return cmd, any(p in cmd for p in patterns)
+
+
+def _load_hooks_section(settings_path: Path) -> tuple:
+    """Load (data, hooks_dict) from settings file. Returns (None, None) on any failure."""
+    if not settings_path.exists():
+        return None, None
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None, None
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return None, None
+    return data, hooks
+
+
+def _partition_entries(entries: list, patterns: list) -> tuple:
+    """Split hook entries into (kept_entries, stripped_commands) for one event."""
+    kept, stripped = [], []
+    for entry in entries:
+        cmd, matched = _hook_command_matches(entry, patterns)
+        if matched:
+            stripped.append(cmd)
         else:
-            shutil.copy2(item, dest)
+            kept.append(entry)
+    return kept, stripped
 
-    # Create venv using uv
-    print("  - Creating venv with uv...")
-    result = subprocess.run(
-        ["uv", "venv", str(venv_dir)],
-        cwd=SHARED_MCP_DIR,
-        capture_output=True,
-        text=True
+
+def _strip_obsolete_hooks(
+    settings_path: Path, patterns: list, backup_dir: Path, dry_run: bool
+) -> list:
+    """Strip hook entries whose command contains any of `patterns`. Returns stripped cmds."""
+    if not patterns:
+        return []
+    data, hooks = _load_hooks_section(settings_path)
+    if data is None:
+        return []
+    all_stripped: list = []
+    for event, entries in list(hooks.items()):
+        if not isinstance(entries, list):
+            continue
+        kept, stripped = _partition_entries(entries, patterns)
+        hooks[event] = kept
+        all_stripped.extend(stripped)
+    if all_stripped and not dry_run:
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(settings_path, backup_dir / settings_path.name)
+        settings_path.write_text(
+            json.dumps(data, indent=2) + "\n", encoding="utf-8"
+        )
+    return all_stripped
+
+
+def _iter_hook_commands(settings_path: Path):
+    """Yield every hook command string in a settings.json file (tolerant)."""
+    if not settings_path.exists():
+        return
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    for entries in (data.get("hooks") or {}).values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            try:
+                cmd = entry.get("hooks", [{}])[0].get("command", "") or ""
+            except Exception:
+                cmd = ""
+            if cmd:
+                yield cmd
+
+
+def _is_within(child: Path, root: Path) -> bool:
+    """Return True if `child` resolves to `root` or any descendant of `root`."""
+    try:
+        c = child.resolve()
+        r = root.resolve()
+    except Exception:
+        return False
+    return c == r or r in c.parents
+
+
+def _auto_inject_legacy_files(project_dir: Path, manifest: dict,
+                              dry_run: bool) -> list:
+    """Register OBSOLETE_FILES that exist on disk but pre-date the manifest."""
+    injected: list = []
+    existing = manifest.get("files", {})
+    for rel in OBSOLETE_FILES:
+        target = project_dir / rel
+        if rel in existing:
+            continue
+        if not target.exists() or not _is_within(target, project_dir):
+            continue
+        if not dry_run:
+            manifest.setdefault("files", {})[rel] = "sha256:legacy-auto-injected"
+        injected.append(rel)
+    return injected
+
+
+def _memory_dir_should_skip(project_dir: Path) -> tuple:
+    """Skip `.beads/memory` removal if knowledge.jsonl has user LEARNED data."""
+    knowledge = project_dir / ".beads" / "memory" / "knowledge.jsonl"
+    try:
+        if knowledge.exists() and knowledge.stat().st_size > 0:
+            return True, f"knowledge.jsonl contains {knowledge.stat().st_size} bytes of LEARNED data — preserved for manual review"
+    except Exception:
+        return False, ""
+    return False, ""
+
+
+def _cleanup_empty_local_settings(project_dir: Path, backup_fn,
+                                  dry_run: bool) -> bool:
+    """Delete .claude/settings.local.json if no real hook entries remain."""
+    path = project_dir / ".claude" / "settings.local.json"
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if data == {}:
+        empty = True
+    elif list(data.keys()) == ["hooks"] and isinstance(data.get("hooks"), dict):
+        empty = all(isinstance(v, list) and not v for v in data["hooks"].values())
+    else:
+        empty = False
+    if not empty:
+        return False
+    if dry_run:
+        return True
+    backup_path = backup_fn() / ".claude" / "settings.local.json"
+    backup_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(path, backup_path)
+    path.unlink()
+    return True
+
+
+def _cleanup_file(rel: str, project_dir: Path, manifest: dict,
+                  backup_fn, dry_run: bool) -> bool:
+    """Remove one obsolete file (manifest-gated). Returns True if it was listed."""
+    if rel not in manifest.get("files", {}):
+        return False
+    target = project_dir / rel
+    if not _is_within(target, project_dir):
+        print(f"[UPGRADE] Skipping suspicious path: {rel} (escapes project_dir)")
+        return False
+    if not target.exists():
+        manifest["files"].pop(rel, None)
+        return False
+    if dry_run:
+        return True
+    backup_path = backup_fn() / rel
+    backup_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(target, backup_path)
+    target.unlink()
+    manifest["files"].pop(rel, None)
+    return True
+
+
+def _cleanup_dir(rel: str, project_dir: Path, manifest: dict,
+                 backup_fn, dry_run: bool) -> bool:
+    """Remove one obsolete directory. Returns True if it was listed."""
+    target = project_dir / rel
+    if not _is_within(target, project_dir):
+        print(f"[UPGRADE] Skipping suspicious path: {rel} (escapes project_dir)")
+        return False
+    if not target.exists() or not target.is_dir():
+        return False
+    if dry_run:
+        return True
+    backup_path = backup_fn() / rel
+    backup_path.parent.mkdir(parents=True, exist_ok=True)
+    if backup_path.exists():
+        shutil.rmtree(backup_path)
+    shutil.copytree(target, backup_path)
+    shutil.rmtree(target)
+    prefix = rel.rstrip("/") + "/"
+    for key in list(manifest.get("files", {}).keys()):
+        if key.startswith(prefix):
+            manifest["files"].pop(key, None)
+    return True
+
+
+def _cleanup_settings(settings_path: Path, patterns: list,
+                      backup_fn, dry_run: bool) -> list:
+    """Strip obsolete hooks from one settings file, return list of stripped commands."""
+    if not patterns:
+        return []
+    if dry_run:
+        return [c for c in _iter_hook_commands(settings_path)
+                if any(p in c for p in patterns)]
+    stripped = _strip_obsolete_hooks(
+        settings_path, patterns, backup_fn(), dry_run
     )
-    if result.returncode != 0:
-        print(f"  ERROR: Failed to create venv: {result.stderr}")
-        return None
+    return stripped
 
-    # Install dependencies
-    print("  - Installing dependencies...")
-    result = subprocess.run(
-        ["uv", "pip", "install", "-e", "."],
-        cwd=SHARED_MCP_DIR,
-        capture_output=True,
-        text=True,
-        env={**os.environ, "VIRTUAL_ENV": str(venv_dir)}
+
+def cleanup_obsolete(project_dir: Path, manifest: dict, dry_run: bool) -> dict:
+    """Remove obsolete files/dirs and strip obsolete settings hook entries.
+
+    Safety rules:
+    - File is removed only if its relative path is a manifest["files"] key
+      (legacy installs get pre-registered via _auto_inject_legacy_files).
+    - Directories are removed if they exist, except .beads/memory which is
+      preserved when knowledge.jsonl still has user LEARNED data.
+    - Every removal is backed up into .claude/.upgrades/<timestamp>/obsolete/<rel>.
+    - Settings files are backed up before editing.
+    - settings.local.json is removed outright if stripping leaves it with no
+      real hook entries.
+    - dry_run=True → compute report, touch nothing on disk.
+    - manifest is mutated in place; caller is responsible for save_manifest.
+    """
+    report = {
+        "removed_files": [], "removed_dirs": [], "skipped_dirs": [],
+        "stripped_settings_hooks": [], "stripped_local_patterns": [],
+        "removed_local_settings": False, "legacy_injected": [],
+        "backups": [None],
+    }
+
+    upgrades_root = project_dir / ".claude" / ".upgrades" / _upgrade_timestamp()
+    obsolete_backup = upgrades_root / "obsolete"
+    state = {"created": False}
+
+    def backup_fn() -> Path:
+        if not state["created"] and not dry_run:
+            obsolete_backup.mkdir(parents=True, exist_ok=True)
+            state["created"] = True
+            report["backups"][0] = str(upgrades_root)
+        return obsolete_backup
+
+    report["legacy_injected"] = _auto_inject_legacy_files(
+        project_dir, manifest, dry_run,
     )
-    if result.returncode != 0:
-        print(f"  ERROR: Failed to install dependencies: {result.stderr}")
-        return None
+    # For accurate dry-run preview, register legacy files in manifest temporarily
+    # so _cleanup_file's safety gate allows them through. Rolled back after loop.
+    dry_run_injected = report["legacy_injected"] if dry_run else []
+    for rel in dry_run_injected:
+        manifest.setdefault("files", {})[rel] = "sha256:legacy-auto-injected"
 
-    print(f"  DONE: provider-delegator installed at {SHARED_MCP_DIR}")
-    return venv_python
+    for rel in OBSOLETE_FILES:
+        if _cleanup_file(rel, project_dir, manifest, backup_fn, dry_run):
+            report["removed_files"].append(rel)
+
+    # Roll back the dry-run temporary injection so the caller's manifest is pristine.
+    for rel in dry_run_injected:
+        manifest.get("files", {}).pop(rel, None)
+
+    report["stripped_settings_hooks"] = _cleanup_settings(
+        project_dir / ".claude" / "settings.json",
+        OBSOLETE_SETTINGS_HOOKS, backup_fn, dry_run,
+    )
+    report["stripped_local_patterns"] = _cleanup_settings(
+        project_dir / ".claude" / "settings.local.json",
+        OBSOLETE_LOCAL_SETTINGS_PATTERNS, backup_fn, dry_run,
+    )
+    report["removed_local_settings"] = _cleanup_empty_local_settings(
+        project_dir, backup_fn, dry_run,
+    )
+
+    for rel in OBSOLETE_DIRS:
+        if rel == ".beads/memory":
+            skip, reason = _memory_dir_should_skip(project_dir)
+            if skip:
+                print(f"[UPGRADE] Skipping .beads/memory/: {reason}")
+                report["skipped_dirs"].append((rel, reason))
+                continue
+        if _cleanup_dir(rel, project_dir, manifest, backup_fn, dry_run):
+            report["removed_dirs"].append(rel)
+    return report
+
+
+def run_bd_doctor(project_dir: Path) -> None:
+    """Run `bd doctor` and print first 20 lines. Soft-fail on any error."""
+    if not shutil.which("bd"):
+        print("  bd doctor unavailable: bd not found in PATH")
+        return
+    try:
+        result = subprocess.run(
+            ["bd", "doctor"], cwd=project_dir,
+            capture_output=True, text=True, shell=_SHELL,
+            stdin=subprocess.DEVNULL, timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        print("  bd doctor unavailable: timed out after 15s")
+        return
+    except Exception as e:
+        print(f"  bd doctor unavailable: {e}")
+        return
+
+    if result.returncode != 0:
+        reason = (result.stderr or result.stdout or "non-zero exit").strip().splitlines()
+        reason_first = reason[0] if reason else f"exit {result.returncode}"
+        print(f"  bd doctor unavailable: {reason_first}")
+        return
+
+    print("  bd doctor:")
+    for line in (result.stdout or "").splitlines()[:20]:
+        print(f"    {line}")
 
 
 # ============================================================================
-# BEADS INSTALLATION
+# STEPS
 # ============================================================================
 
-def install_beads(project_dir: Path, claude_only: bool = False) -> bool:
+def install_beads(project_dir: Path) -> bool:
     """Install beads CLI and initialize .beads directory."""
-    step = "[1/7]" if claude_only else "[1/8]"
-    print(f"\n{step} Installing beads...")
+    print("\n[1/6] Installing beads...")
 
-    beads_dir = project_dir / ".beads"
-
-    # Check if beads is already installed globally
-    beads_installed = shutil.which("bd") is not None
-
-    if not beads_installed:
+    if not shutil.which("bd"):
         print("  - beads CLI (bd) not found, installing...")
-
-        # Try installation methods in order of preference
-        installed = False
-
-        # Method 1: Homebrew (macOS)
-        if shutil.which("brew") and sys.platform == "darwin":
-            print("  - Trying Homebrew...")
-            result = subprocess.run(
-                ["brew", "install", "steveyegge/beads/bd"],
-                capture_output=True,
-                text=True
-            )
-            if result.returncode == 0:
-                installed = True
-                print("  - Installed via Homebrew")
-
-        # Method 2: npm (cross-platform)
-        if not installed and shutil.which("npm"):
-            print("  - Trying npm...")
-            result = subprocess.run(
-                ["npm", "install", "-g", "@beads/bd"],
-                capture_output=True,
-                text=True
-            )
-            if result.returncode == 0:
-                installed = True
-                print("  - Installed via npm")
-
-        # Method 3: curl install script (Linux/macOS/FreeBSD)
-        if not installed and sys.platform != "win32":
-            print("  - Trying curl install script...")
-            result = subprocess.run(
-                ["bash", "-c", "curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash"],
-                capture_output=True,
-                text=True
-            )
-            if result.returncode == 0:
-                installed = True
-                print("  - Installed via curl script")
-
-        # Method 4: Go install (if Go is available)
-        if not installed and shutil.which("go"):
-            print("  - Trying go install...")
-            result = subprocess.run(
-                ["go", "install", "github.com/steveyegge/beads/cmd/bd@latest"],
-                capture_output=True,
-                text=True
-            )
-            if result.returncode == 0:
-                installed = True
-                print("  - Installed via go install")
-
-        if not installed:
-            print("\n  ERROR: Could not install beads CLI (bd)")
-            print("  The beads workflow requires the bd command.")
-            print("  Please install manually: https://github.com/steveyegge/beads#-installation")
-            print("\n  Installation options:")
-            print("    macOS:   brew install steveyegge/beads/bd")
-            print("    npm:     npm install -g @beads/bd")
-            print("    Go:      go install github.com/steveyegge/beads/cmd/bd@latest")
+        for method, cmd in [
+            ("Homebrew", ["brew", "install", "gastownhall/beads/bd"]),
+            ("npm", ["npm", "install", "-g", "@beads/bd"]),
+            ("go", ["go", "install", "github.com/gastownhall/beads/cmd/bd@latest"]),
+        ]:
+            if shutil.which(cmd[0]):
+                result = subprocess.run(cmd, capture_output=True, text=True, shell=_SHELL)
+                if result.returncode == 0:
+                    print(f"  - Installed via {method}")
+                    break
+        else:
+            print("  ERROR: Could not install beads CLI (bd)")
+            print("  Install manually: https://github.com/gastownhall/beads#-installation")
             return False
     else:
         print("  - beads CLI already installed")
 
-    beads_installed = True
-
-    # Initialize .beads in project
+    beads_dir = project_dir / ".beads"
     if not beads_dir.exists():
         print("  - Initializing .beads directory...")
-
-        # Try bd init first
-        if shutil.which("bd"):
+        try:
             result = subprocess.run(
-                ["bd", "init"],
-                cwd=project_dir,
-                capture_output=True,
-                text=True
+                ["bd", "init"], cwd=project_dir,
+                capture_output=True, text=True, shell=_SHELL,
+                stdin=subprocess.DEVNULL, timeout=15,
             )
-            if result.returncode == 0:
-                print("  - Initialized via 'bd init'")
-            else:
-                # Manual init as fallback
-                _manual_beads_init(beads_dir)
-        else:
-            _manual_beads_init(beads_dir)
-    else:
-        print("  - .beads already exists")
+        except subprocess.TimeoutExpired:
+            result = None
+            print("  - bd init timed out (Dolt server not running?)")
+        if result is None or result.returncode != 0:
+            beads_dir.mkdir(exist_ok=True)
+            (beads_dir / "issues.jsonl").touch()
+            print("  - Created .beads manually (run 'bd init' later with Dolt server running)")
 
-    # Configure custom 'inreview' status for parallel work workflow
-    if shutil.which("bd"):
-        print("  - Configuring custom 'inreview' status...")
-        result = subprocess.run(
-            ["bd", "config", "set", "status.custom", "inreview"],
-            cwd=project_dir,
-            capture_output=True,
-            text=True
-        )
-        if result.returncode == 0:
-            print("  - Added 'inreview' custom status")
-        else:
-            print(f"  - Warning: Could not add custom status: {result.stderr}")
-
-    print("  DONE: beads setup complete")
+    print("  DONE")
     return True
 
 
-def _manual_beads_init(beads_dir: Path):
-    """Manually create .beads directory structure."""
-    beads_dir.mkdir(exist_ok=True)
-    (beads_dir / "issues.jsonl").touch()
-    # Create minimal config
-    config = {
-        "version": "1",
-        "mode": "normal"
-    }
-    (beads_dir / "config.json").write_text(json.dumps(config, indent=2))
-    print("  - Created .beads manually")
-
-
-def setup_memory(project_dir: Path) -> None:
-    """Create .beads/memory/ directory with knowledge store and recall script."""
-    memory_dir = project_dir / ".beads" / "memory"
-    memory_dir.mkdir(parents=True, exist_ok=True)
-
-    # Create empty knowledge store
-    knowledge_file = memory_dir / "knowledge.jsonl"
-    if not knowledge_file.exists():
-        knowledge_file.touch()
-        print("  - Created .beads/memory/knowledge.jsonl")
-
-    # Copy recall script
-    recall_src = TEMPLATES_DIR / "memory" / "recall.sh"
-    recall_dest = memory_dir / "recall.sh"
-    if recall_src.exists():
-        shutil.copy2(recall_src, recall_dest)
-        recall_dest.chmod(recall_dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-        print("  - Copied .beads/memory/recall.sh")
-    else:
-        print("  - WARNING: recall.sh template not found")
-
-
-# ============================================================================
-# RAMS INSTALLATION (Accessibility Review)
-# ============================================================================
-
-def install_rams() -> bool:
-    """Install RAMS accessibility review tool if not already installed."""
-    print("\n  Checking RAMS (accessibility review tool)...")
-
-    # Check if rams is already installed
-    if shutil.which("rams"):
-        print("  - RAMS already installed")
-        return True
-
-    print("  - RAMS not found, installing...")
-
-    # Install via curl
-    if sys.platform != "win32":
-        result = subprocess.run(
-            ["bash", "-c", "curl -fsSL https://rams.ai/install | bash"],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode == 0:
-            print("  - RAMS installed successfully")
-            return True
-        else:
-            print(f"  - Warning: Could not install RAMS: {result.stderr}")
-            print("  - Frontend supervisors will still work but RAMS review enforcement may fail")
-            print("  - Install manually: curl -fsSL https://rams.ai/install | bash")
-            return False
-
-    print("  - Warning: RAMS installation not supported on Windows")
-    return False
-
-
-# ============================================================================
-# WEB INTERFACE GUIDELINES INSTALLATION
-# ============================================================================
-
-def install_web_interface_guidelines() -> bool:
-    """Install Web Interface Guidelines review tool if not already installed."""
-    print("\n  Checking Web Interface Guidelines (design review tool)...")
-
-    # Check if wig is already installed
-    if shutil.which("wig"):
-        print("  - Web Interface Guidelines already installed")
-        return True
-
-    print("  - Web Interface Guidelines not found, installing...")
-
-    # Install via curl
-    if sys.platform != "win32":
-        result = subprocess.run(
-            ["bash", "-c", "curl -fsSL https://vercel.com/design/guidelines/install | bash"],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode == 0:
-            print("  - Web Interface Guidelines installed successfully")
-            return True
-        else:
-            print(f"  - Warning: Could not install Web Interface Guidelines: {result.stderr}")
-            print("  - Frontend supervisors will still work but WIG review enforcement may fail")
-            print("  - Install manually: curl -fsSL https://vercel.com/design/guidelines/install | bash")
-            return False
-
-    print("  - Warning: Web Interface Guidelines installation not supported on Windows")
-    return False
-
-
-# ============================================================================
-# AGENTS (TEMPLATE COPYING)
-# ============================================================================
-
-def copy_agents(project_dir: Path, project_name: str, claude_only: bool = False, with_kanban_ui: bool = False) -> list:
-    """Copy core agent templates from templates/ directory.
-
-    NOTE: Supervisors are NOT copied here - they are created dynamically
-    by the discovery agent based on detected tech stack.
-    """
-    step = "[2/7]" if claude_only else "[2/8]"
-    print(f"\n{step} Copying core agent templates...")
-
+def copy_agents(
+    project_dir: Path, project_name: str,
+    manifest: dict, force: bool = False,
+) -> list:
+    """Copy code-reviewer and merge-supervisor templates."""
+    print("\n[2/6] Copying agents...")
     agents_dir = project_dir / ".claude" / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
+    skipped = []
 
-    agents_template_dir = TEMPLATES_DIR / "agents"
-
-    copied = []
-
-    # Replacements for templates
-    replacements = {
-        "[Project]": project_name,
-    }
-
-    # Copy core agents ONLY (not supervisors)
-    for agent_file in agents_template_dir.glob("*.md"):
+    replacements = {"[Project]": project_name}
+    for agent_file in (TEMPLATES_DIR / "agents").glob("*.md"):
         dest = agents_dir / agent_file.name
-        copy_and_replace(agent_file, dest, replacements)
-        copied.append(agent_file.name)
-        print(f"  - Copied {agent_file.name}")
-
-    # Copy beads workflow injection snippet (used by discovery agent)
-    # Select API version (with git fallback) or git-only version based on flag
-    if with_kanban_ui:
-        beads_workflow_src = TEMPLATES_DIR / "beads-workflow-injection-api.md"
-        workflow_type = "API + git fallback"
-    else:
-        beads_workflow_src = TEMPLATES_DIR / "beads-workflow-injection-git.md"
-        workflow_type = "git only"
-    beads_workflow_dest = project_dir / ".claude" / "beads-workflow-injection.md"
-    if beads_workflow_src.exists():
-        shutil.copy2(beads_workflow_src, beads_workflow_dest)
-        print(f"  - Copied beads-workflow-injection.md ({workflow_type})")
-
-    # Copy UI constraints (used by discovery agent for frontend supervisors)
-    ui_constraints_src = TEMPLATES_DIR / "ui-constraints.md"
-    ui_constraints_dest = project_dir / ".claude" / "ui-constraints.md"
-    if ui_constraints_src.exists():
-        shutil.copy2(ui_constraints_src, ui_constraints_dest)
-        print("  - Copied ui-constraints.md")
-
-    # Copy frontend reviews requirement (RAMS + Web Interface Guidelines)
-    frontend_reviews_src = TEMPLATES_DIR / "frontend-reviews-requirement.md"
-    frontend_reviews_dest = project_dir / ".claude" / "frontend-reviews-requirement.md"
-    if frontend_reviews_src.exists():
-        shutil.copy2(frontend_reviews_src, frontend_reviews_dest)
-        print("  - Copied frontend-reviews-requirement.md")
-
-    print(f"  DONE: {len(copied)} core agents copied")
-    print("  NOTE: Supervisors will be created by discovery agent based on tech stack")
-    return copied
+        rel_key = f"agents/{agent_file.name}"
+        ok, reason = should_update_file(dest, rel_key, manifest, force)
+        if ok:
+            copy_and_replace(agent_file, dest, replacements)
+            manifest["files"][rel_key] = file_sha256(dest)
+            print(f"  - {agent_file.name}" + (f" ({reason})" if reason != "new" else ""))
+        else:
+            # Save new version to .upgrades/
+            new_content = agent_file.read_text(encoding="utf-8")
+            for placeholder, value in replacements.items():
+                new_content = new_content.replace(placeholder, value)
+            save_upgrade(project_dir, rel_key, new_content)
+            skipped.append(rel_key)
+            print(f"  - {agent_file.name} (MODIFIED by user — skipped)")
+            print(f"    New version saved to: .claude/.upgrades/{rel_key}")
+    print("  DONE")
+    return skipped
 
 
-# ============================================================================
-# SKILLS (TEMPLATE COPYING)
-# ============================================================================
-
-def copy_skills(project_dir: Path, claude_only: bool = False) -> list:
-    """Copy skill templates from templates/ directory.
-
-    Skills are copied so discovery agent can install them when tech stack is detected.
-    """
-    step = "[3/7]" if claude_only else "[3/8]"
-    print(f"\n{step} Copying skill templates...")
-
-    skills_template_dir = TEMPLATES_DIR / "skills"
-    if not skills_template_dir.exists():
-        print("  - No skill templates found, skipping")
-        return []
-
-    skills_dir = project_dir / ".claude" / "skills"
-    skills_dir.mkdir(parents=True, exist_ok=True)
-
-    copied = []
-
-    for skill_dir in skills_template_dir.iterdir():
-        if skill_dir.is_dir():
-            dest_dir = skills_dir / skill_dir.name
-            if dest_dir.exists():
-                shutil.rmtree(dest_dir)
-            shutil.copytree(skill_dir, dest_dir)
-            copied.append(skill_dir.name)
-            print(f"  - Copied {skill_dir.name}/ skill")
-
-    print(f"  DONE: {len(copied)} skill templates copied")
-    return copied
-
-
-# ============================================================================
-# HOOKS (TEMPLATE COPYING)
-# ============================================================================
-
-def copy_hooks(project_dir: Path, claude_only: bool = False) -> list:
-    """Copy hook templates from templates/ directory.
-
-    Args:
-        project_dir: Target project directory
-        claude_only: If True, skip provider delegation enforcement hooks
-    """
-    step = "[4/7]" if claude_only else "[4/8]"
-    print(f"\n{step} Copying hook templates...")
-
+def copy_hooks(project_dir: Path, manifest: dict) -> None:
+    """Copy Node.js hooks (always overwrite — enforcement code)."""
+    print("\n[3/6] Copying hooks...")
     hooks_dir = project_dir / ".claude" / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
 
-    hooks_template_dir = TEMPLATES_DIR / "hooks"
-    copied = []
-
-    # Hooks to skip in claude-only mode (none currently - all hooks apply to both modes)
-    skip_in_claude_only = set()
-
-    for hook_file in hooks_template_dir.glob("*.sh"):
-        # Skip provider enforcement hooks in claude-only mode
-        if claude_only and hook_file.name in skip_in_claude_only:
-            print(f"  - Skipped {hook_file.name} (claude-only mode)")
-            continue
-
+    for hook_file in (TEMPLATES_DIR / "hooks").glob("*.cjs"):
         dest = hooks_dir / hook_file.name
         shutil.copy2(hook_file, dest)
-        dest.chmod(dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-        copied.append(hook_file.name)
-        print(f"  - Copied {hook_file.name}")
-
-    print(f"  DONE: {len(copied)} hooks copied")
-    return copied
+        rel_key = f"hooks/{hook_file.name}"
+        manifest["files"][rel_key] = file_sha256(dest)
+        print(f"  - {hook_file.name}")
+    print("  DONE")
 
 
-# ============================================================================
-# SETTINGS
-# ============================================================================
+def copy_rules_and_skills(
+    project_dir: Path, with_rules: bool, lang: str = "en",
+    manifest: dict = None, force: bool = False,
+) -> list:
+    """Copy beads-workflow rule, project-discovery skill, and optional dev rules."""
+    print("\n[4/6] Copying rules and skills...")
+    rules_dir = project_dir / ".claude" / "rules"
+    rules_dir.mkdir(parents=True, exist_ok=True)
+    skipped = []
 
-def copy_settings(project_dir: Path, claude_only: bool = False) -> None:
-    """Copy settings.json template, optionally removing provider enforcement hooks.
+    # Determine source directory based on language
+    rules_src_dir = TEMPLATES_DIR / ("rules-ru" if lang == "ru" else "rules")
 
-    Args:
-        project_dir: Target project directory
-        claude_only: If True, remove provider delegation enforcement from settings
-    """
-    step = "[5/7]" if claude_only else "[5/8]"
-    print(f"\n{step} Copying settings...")
+    # Always copy beads workflow (always English — it's the canonical format)
+    beads_src = TEMPLATES_DIR / "rules" / "beads-workflow.md"
+    if beads_src.exists():
+        dest = rules_dir / "beads-workflow.md"
+        rel_key = "rules/beads-workflow.md"
+        ok, reason = should_update_file(dest, rel_key, manifest, force)
+        if ok:
+            shutil.copy2(beads_src, dest)
+            manifest["files"][rel_key] = file_sha256(dest)
+            print(f"  - rules/beads-workflow.md" + (f" ({reason})" if reason != "new" else ""))
+        else:
+            save_upgrade(project_dir, rel_key, beads_src.read_text(encoding="utf-8"))
+            skipped.append(rel_key)
+            print(f"  - rules/beads-workflow.md (MODIFIED by user — skipped)")
+            print(f"    New version saved to: .claude/.upgrades/{rel_key}")
 
-    settings_template = TEMPLATES_DIR / "settings.json"
+    # Optional dev rules (from language-specific directory)
+    if with_rules:
+        for rule_file in rules_src_dir.glob("*.md"):
+            if rule_file.name != "beads-workflow.md":
+                dest = rules_dir / rule_file.name
+                rel_key = f"rules/{rule_file.name}"
+                ok, reason = should_update_file(dest, rel_key, manifest, force)
+                if ok:
+                    shutil.copy2(rule_file, dest)
+                    manifest["files"][rel_key] = file_sha256(dest)
+                    suffix = f" ({lang})" if lang != "en" else ""
+                    suffix += f" ({reason})" if reason != "new" else ""
+                    print(f"  - rules/{rule_file.name}{suffix}")
+                else:
+                    save_upgrade(project_dir, rel_key, rule_file.read_text(encoding="utf-8"))
+                    skipped.append(rel_key)
+                    print(f"  - rules/{rule_file.name} (MODIFIED by user — skipped)")
+                    print(f"    New version saved to: .claude/.upgrades/{rel_key}")
+
+    # Project discovery skill (always overwrite — our code)
+    skills_dir = project_dir / ".claude" / "skills"
+    skill_src = TEMPLATES_DIR / "skills" / "project-discovery"
+    if skill_src.exists():
+        dest = skills_dir / "project-discovery"
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(skill_src, dest)
+        # Record skill files in manifest
+        for skill_file in dest.rglob("*"):
+            if skill_file.is_file():
+                rel_key = str(skill_file.relative_to(project_dir / ".claude")).replace("\\", "/")
+                manifest["files"][rel_key] = file_sha256(skill_file)
+        print("  - skills/project-discovery/")
+
+    print("  DONE")
+    return skipped
+
+
+def copy_settings_and_claude_md(project_dir: Path, project_name: str) -> None:
+    """Copy settings.json (merge hooks) and CLAUDE.md (append if exists)."""
+    print("\n[5/6] Copying settings and CLAUDE.md...")
+
+    # --- settings.json: merge hooks into existing ---
     settings_dest = project_dir / ".claude" / "settings.json"
+    settings_src = TEMPLATES_DIR / "settings.json"
+    if settings_src.exists():
+        new_settings = json.loads(settings_src.read_text(encoding='utf-8'))
+        if settings_dest.exists():
+            try:
+                existing = json.loads(settings_dest.read_text(encoding='utf-8'))
+                # Merge hooks by event type
+                for event, hooks_list in new_settings.get("hooks", {}).items():
+                    existing.setdefault("hooks", {}).setdefault(event, [])
+                    existing_commands = {
+                        h["hooks"][0]["command"]
+                        for h in existing["hooks"][event]
+                        if h.get("hooks") and h["hooks"][0].get("command")
+                    }
+                    for hook in hooks_list:
+                        cmd = hook.get("hooks", [{}])[0].get("command", "")
+                        if cmd not in existing_commands:
+                            existing["hooks"][event].append(hook)
+                settings_dest.write_text(json.dumps(existing, indent=2) + "\n", encoding='utf-8')
+                print("  - settings.json (merged hooks)")
+            except Exception:
+                shutil.copy2(settings_src, settings_dest)
+                print("  - settings.json (replaced — could not merge)")
+        else:
+            settings_dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(settings_src, settings_dest)
+            print("  - settings.json")
 
-    # Settings are the same for both modes now (no provider-specific hooks)
-    shutil.copy2(settings_template, settings_dest)
-    if claude_only:
-        print("  - Copied settings.json (claude-only mode)")
-    else:
-        print("  - Copied settings.json")
-
-    print("  DONE: settings configured")
-
-
-# ============================================================================
-# CLAUDE.MD
-# ============================================================================
-
-def copy_claude_md(project_dir: Path, project_name: str, claude_only: bool = False) -> None:
-    """Copy CLAUDE.md template with project name replacement."""
-    step = "[6/7]" if claude_only else "[6/8]"
-    print(f"\n{step} Copying CLAUDE.md...")
-
-    claude_template = TEMPLATES_DIR / "CLAUDE.md"
+    # --- CLAUDE.md: append beads section if file exists ---
     claude_dest = project_dir / "CLAUDE.md"
+    claude_src = TEMPLATES_DIR / "CLAUDE.md"
+    if claude_src.exists():
+        beads_content = claude_src.read_text(encoding='utf-8').replace("[Project]", project_name)
+        if claude_dest.exists():
+            existing_content = claude_dest.read_text(encoding='utf-8')
+            if "## Workflow" in existing_content and "beads" in existing_content.lower():
+                print("  - CLAUDE.md (already has beads section, skipped)")
+            else:
+                separator = "\n\n---\n\n# Beads Orchestration\n\n"
+                with open(claude_dest, "a", encoding="utf-8") as f:
+                    f.write(separator + beads_content)
+                print("  - CLAUDE.md (appended beads section)")
+        else:
+            claude_dest.write_text(beads_content, encoding='utf-8')
+            print("  - CLAUDE.md (created)")
 
-    replacements = {"[Project]": project_name}
-    copy_and_replace(claude_template, claude_dest, replacements)
-
-    print("  - Copied CLAUDE.md")
-    print("  DONE: CLAUDE.md copied")
+    print("  DONE")
 
 
-# ============================================================================
-# GITIGNORE
-# ============================================================================
-
-def setup_gitignore(project_dir: Path, claude_only: bool = False) -> None:
-    """Ensure .beads is in .gitignore. .claude/ is tracked (not ignored)."""
-    step = "[7/7]" if claude_only else "[7/8]"
-    print(f"\n{step} Setting up .gitignore...")
-
+def setup_gitignore(project_dir: Path) -> None:
+    """Ensure .beads/, .worktrees/, and .claude/.upgrades/ are in .gitignore."""
+    print("\n[6/6] Setting up .gitignore...")
     gitignore_path = project_dir / ".gitignore"
-    # Only ignore .beads/ (ephemeral task data) and .mcp.json (user-specific paths)
-    # .claude/ is tracked so it survives git operations
-    entries_to_add = [".beads/", ".mcp.json"]
+    entries = [".beads/", ".worktrees/", ".claude/.upgrades/"]
 
     if gitignore_path.exists():
-        content = gitignore_path.read_text()
-        lines = content.splitlines()
-
-        # Check which entries are missing
-        missing = []
-        for entry in entries_to_add:
-            # Check for exact match or without trailing slash
-            entry_no_slash = entry.rstrip("/")
-            if entry not in lines and entry_no_slash not in lines:
-                missing.append(entry)
-
+        content = gitignore_path.read_text(encoding='utf-8')
+        missing = [e for e in entries if e not in content and e.rstrip("/") not in content]
         if missing:
-            # Append missing entries
-            with open(gitignore_path, "a") as f:
-                # Add newline if file doesn't end with one
+            with open(gitignore_path, "a", encoding="utf-8") as f:
                 if content and not content.endswith("\n"):
                     f.write("\n")
-                f.write("\n# Beads task tracking (ephemeral)\n")
+                f.write("\n# Beads orchestration\n")
                 for entry in missing:
                     f.write(f"{entry}\n")
-                    print(f"  - Added {entry} to .gitignore")
+                    print(f"  - Added {entry}")
         else:
-            print("  - .beads/ and .mcp.json already in .gitignore")
+            print("  - Already configured")
     else:
-        # Create new .gitignore
-        content = """# Beads task tracking (ephemeral)
-.beads/
+        gitignore_path.write_text(
+            "# Beads orchestration\n.beads/\n.worktrees/\n.claude/.upgrades/\n",
+            encoding='utf-8',
+        )
+        print("  - Created .gitignore")
 
-# MCP config (user-specific paths)
-.mcp.json
-"""
-        gitignore_path.write_text(content)
-        print("  - Created .gitignore with .beads/ and .mcp.json")
-
-    print("  DONE: .gitignore configured")
-    print("  NOTE: .claude/ is tracked (not ignored) to prevent accidental loss")
-
-
-# ============================================================================
-# MCP CONFIG
-# ============================================================================
-
-def create_mcp_config(project_dir: Path, venv_python: Path) -> None:
-    """Add provider-delegator to .mcp.json, preserving existing servers."""
-    print("\n[8/8] Configuring MCP...")
-
-    mcp_dest = project_dir / ".mcp.json"
-
-    # Load existing config or start fresh
-    if mcp_dest.exists():
-        try:
-            existing = json.loads(mcp_dest.read_text())
-            print("  - Found existing .mcp.json, merging...")
-        except json.JSONDecodeError:
-            print("  - Warning: Invalid .mcp.json, creating new one")
-            existing = {}
-    else:
-        existing = {}
-
-    # Ensure mcpServers key exists
-    if "mcpServers" not in existing:
-        existing["mcpServers"] = {}
-
-    # Add/update provider_delegator
-    existing["mcpServers"]["provider_delegator"] = {
-        "type": "stdio",
-        "command": str(venv_python),
-        "args": ["-m", "mcp_provider_delegator.server"],
-        "env": {
-            "AGENT_TEMPLATES_PATH": ".claude/agents"
-        }
-    }
-
-    mcp_dest.write_text(json.dumps(existing, indent=2))
-
-    server_count = len(existing["mcpServers"])
-    print(f"  - Added provider-delegator to .mcp.json ({server_count} total servers)")
-    print(f"    Command: {venv_python}")
-    print(f"    Agents: .claude/agents (relative)")
-    print("  DONE: MCP config updated")
-
-
-# ============================================================================
-# VERIFICATION
-# ============================================================================
-
-def verify_installation(project_dir: Path, claude_only: bool = False) -> bool:
-    """Verify all components were installed correctly."""
-    checks = {
-        ".claude/hooks": "Hooks directory",
-        ".claude/agents": "Agents directory",
-        ".claude/settings.json": "Settings file",
-        ".beads": "Beads directory",
-        "CLAUDE.md": "CLAUDE.md",
-        ".gitignore": ".gitignore",
-    }
-
-    # Only check for .mcp.json in external providers mode
-    if not claude_only:
-        checks[".mcp.json"] = "MCP config"
-
-    print("\n=== Verification ===")
-    all_good = True
-
-    for path, description in checks.items():
-        full_path = project_dir / path
-        if full_path.exists():
-            print(f"  - {description}")
-        else:
-            print(f"  X {description} MISSING")
-            all_good = False
-
-    # Count files
-    hooks_dir = project_dir / ".claude/hooks"
-    if hooks_dir.exists():
-        hook_count = len(list(hooks_dir.glob("*.sh")))
-        print(f"  - Hooks: {hook_count}")
-
-    agents_dir = project_dir / ".claude/agents"
-    if agents_dir.exists():
-        agent_count = len(list(agents_dir.glob("*.md")))
-        print(f"  - Agents: {agent_count}")
-
-    skills_dir = project_dir / ".claude/skills"
-    if skills_dir.exists():
-        skill_count = len(list(skills_dir.iterdir()))
-        if skill_count > 0:
-            print(f"  - Skills: {skill_count}")
-
-    return all_good
+    print("  DONE")
 
 
 # ============================================================================
 # MAIN
 # ============================================================================
 
-def main():
-    import argparse
+def _print_cleanup_report(report: dict, dry_run: bool) -> None:
+    """Print a [UPGRADE] Cleanup: block from cleanup_obsolete report."""
+    prefix = "[DRY-RUN] " if dry_run else ""
+    print("\n[UPGRADE] Cleanup:")
+    for rel in report.get("legacy_injected", []):
+        print(f"  {prefix}auto-injected legacy file into manifest: {rel}")
+    for rel in report["removed_files"]:
+        print(f"  {prefix}removed file: {rel}")
+    for rel in report["removed_dirs"]:
+        print(f"  {prefix}removed dir:  {rel}")
+    for rel, reason in report.get("skipped_dirs", []):
+        print(f"  {prefix}skipped dir:  {rel} ({reason})")
+    for cmd in report["stripped_settings_hooks"]:
+        print(f"  {prefix}stripped settings hook: {cmd}")
+    for cmd in report["stripped_local_patterns"]:
+        print(f"  {prefix}stripped local hook:    {cmd}")
+    if report.get("removed_local_settings"):
+        print(f"  {prefix}removed file: .claude/settings.local.json (no hooks left)")
+    backup = report["backups"][0]
+    if backup:
+        print(f"  backup: {backup}")
+    if not any([
+        report["removed_files"], report["removed_dirs"],
+        report.get("skipped_dirs"),
+        report["stripped_settings_hooks"], report["stripped_local_patterns"],
+        report.get("removed_local_settings"),
+        report.get("legacy_injected"),
+    ]):
+        print("  nothing to clean")
 
-    parser = argparse.ArgumentParser(description="Bootstrap beads-based orchestration")
-    parser.add_argument("--project-name", default=None, help="Project name (auto-inferred if not provided)")
-    parser.add_argument("--project-dir", default=".", help="Project directory")
-    parser.add_argument("--external-providers", action="store_true",
-                        help="Use Codex/Gemini for delegation (default: Claude-only)")
-    parser.add_argument("--with-kanban-ui", action="store_true",
-                        help="Use Beads Kanban UI API for worktree creation (with git fallback)")
-    args = parser.parse_args()
 
-    project_dir = Path(args.project_dir).resolve()
-    claude_only = not args.external_providers  # Default is now claude-only
-    with_kanban_ui = args.with_kanban_ui
-
-    # Ensure project directory exists
+def bootstrap_project(
+    project_dir: Path, project_name: str | None, with_rules: bool,
+    lang: str, force: bool, upgrade: bool, dry_run: bool,
+) -> int:
+    """Run bootstrap for a single project. Returns exit code (0 = success)."""
     project_dir.mkdir(parents=True, exist_ok=True)
+    resolved_name = project_name or infer_project_name(project_dir)
 
-    # Auto-infer project name if not provided
-    if args.project_name:
-        project_name = args.project_name
-    else:
-        project_name = infer_project_name(project_dir)
-        print(f"Auto-inferred project name: {project_name}")
-
-    mode_str = "CLAUDE-ONLY" if claude_only else "EXTERNAL PROVIDERS"
-    worktree_str = "API + git fallback" if with_kanban_ui else "git only"
-    print(f"\nBootstrapping beads orchestration for: {project_name}")
+    print(f"\nBootstrapping beads orchestration for: {resolved_name}")
     print(f"Directory: {project_dir}")
-    print(f"Mode: {mode_str}")
-    print(f"Worktrees: {worktree_str}")
+    if force:
+        print("Mode: FORCE (overwriting all files)")
+    if upgrade:
+        print("Mode: UPGRADE" + (" (dry-run)" if dry_run else ""))
     print("=" * 60)
 
-    # Verify templates exist
     if not TEMPLATES_DIR.exists():
-        print(f"\nERROR: Templates directory not found: {TEMPLATES_DIR}")
-        print("Make sure you cloned the full lean-orchestration repo")
-        sys.exit(1)
+        print(f"\nERROR: Templates not found: {TEMPLATES_DIR}")
+        return 1
 
-    venv_python = None
+    manifest = load_manifest(project_dir)
+    all_skipped = []
 
-    # Step 0: Setup bundled provider-delegator (skip in claude-only mode)
-    if not claude_only:
-        venv_python = setup_provider_delegator()
-        if not venv_python:
-            print("\nERROR: Failed to setup provider-delegator. Aborting.")
-            sys.exit(1)
+    if not install_beads(project_dir):
+        return 1
 
-        # Run remaining steps with provider support
-        if not install_beads(project_dir, claude_only=False):
-            print("\nERROR: Beads CLI is required. Aborting bootstrap.")
-            sys.exit(1)
+    all_skipped += copy_agents(project_dir, resolved_name, manifest, force)
+    copy_hooks(project_dir, manifest)
+    all_skipped += copy_rules_and_skills(
+        project_dir, with_rules, lang, manifest, force,
+    )
+    copy_settings_and_claude_md(project_dir, resolved_name)
+    setup_gitignore(project_dir)
 
-        # Install frontend review tools (optional, won't block)
-        install_rams()
-        install_web_interface_guidelines()
+    # Read version from package.json (same package as bootstrap.py)
+    pkg_json = SCRIPT_DIR / "package.json"
+    pkg_version = None
+    if pkg_json.exists():
+        try:
+            pkg_version = json.loads(pkg_json.read_text(encoding="utf-8")).get("version")
+        except Exception:
+            pass
 
-        copy_agents(project_dir, project_name, claude_only=False, with_kanban_ui=with_kanban_ui)
-        copy_skills(project_dir, claude_only=False)
-        copy_hooks(project_dir, claude_only=False)
-        copy_settings(project_dir, claude_only=False)
-        copy_claude_md(project_dir, project_name, claude_only=False)
-        setup_memory(project_dir)
-        setup_gitignore(project_dir, claude_only=False)
-        create_mcp_config(project_dir, venv_python)
-    else:
-        # Claude-only mode: skip provider setup
-        print("\n[0/7] Skipping provider-delegator setup (claude-only mode)")
+    # Run upgrade cleanup AFTER init steps so manifest reflects our files.
+    # Legacy installs without manifest are handled by _auto_inject_legacy_files
+    # inside cleanup_obsolete — the OBSOLETE_* paths are dev-controlled and safe.
+    if upgrade:
+        report = cleanup_obsolete(project_dir, manifest, dry_run)
+        _print_cleanup_report(report, dry_run)
 
-        if not install_beads(project_dir, claude_only=True):
-            print("\nERROR: Beads CLI is required. Aborting bootstrap.")
-            sys.exit(1)
-
-        # Install frontend review tools (optional, won't block)
-        install_rams()
-        install_web_interface_guidelines()
-
-        copy_agents(project_dir, project_name, claude_only=True, with_kanban_ui=with_kanban_ui)
-        copy_skills(project_dir, claude_only=True)
-        copy_hooks(project_dir, claude_only=True)
-        copy_settings(project_dir, claude_only=True)
-        copy_claude_md(project_dir, project_name, claude_only=True)
-        setup_memory(project_dir)
-        setup_gitignore(project_dir, claude_only=True)
-
-    # Verify
-    if not verify_installation(project_dir, claude_only):
-        print("\nWARNING: Installation incomplete - check errors above")
+    manifest["version"] = pkg_version
+    manifest["installed_at"] = datetime.now(timezone.utc).isoformat()
+    if not dry_run:
+        save_manifest(project_dir, manifest)
 
     print("\n" + "=" * 60)
     print("BOOTSTRAP COMPLETE")
     print("=" * 60)
 
-    if claude_only:
-        print(f"""
-Mode: CLAUDE-ONLY (all agents use Claude Task)
+    if all_skipped:
+        print(f"\n  {len(all_skipped)} file(s) skipped (user-modified):")
+        for rel in all_skipped:
+            print(f"    - {rel}")
+            print(f"      Review: diff .claude/{rel} .claude/.upgrades/{rel}")
 
+    # Post-upgrade health check — never fatal
+    if upgrade and not dry_run:
+        print("")
+        run_bd_doctor(project_dir)
+
+    print(f"""
 Next steps:
 
-1. Restart Claude Code to load new hooks and agents
-
-2. **REQUIRED: Run discovery to create supervisors**
-   Discovery will scan your codebase and fetch specialist agents:
-
-   Task(
-       subagent_type="discovery",
-       prompt="Detect tech stack and create supervisors for {project_name}"
-   )
-
-3. Create your first bead:
-   bd create "First task"
-
-4. Dispatch work to supervisors:
-   Task(subagent_type="<supervisor-name>", prompt="BEAD_ID: BD-001\\n\\nImplement...")
-
-NOTE: All agents (scout, detective, architect, etc.) run via Claude Task().
-No external providers (Codex/Gemini) are configured.
+1. Restart Claude Code to load hooks and agents
+2. Run /project-discovery to extract project conventions
+3. Create your first bead: bd create "Task" -d "Description"
+4. Dispatch work: Task(subagent_type="general-purpose", prompt="BEAD_ID: ...")
 """)
-    else:
-        print(f"""
-Mode: EXTERNAL PROVIDERS (Codex → Gemini → Claude fallback)
+    return 0
 
-Next steps:
 
-1. Restart Claude Code to load new hooks and agents
+def run_batch_upgrade(
+    parent_dir: Path, with_rules: bool, lang: str, force: bool, dry_run: bool,
+) -> int:
+    """Iterate direct subdirs of parent_dir that contain .beads/ and upgrade each."""
+    if not parent_dir.exists() or not parent_dir.is_dir():
+        print(f"ERROR: --all parent directory not found: {parent_dir}")
+        return 1
 
-2. **REQUIRED: Run discovery to create supervisors**
-   Discovery will scan your codebase and fetch specialist agents:
+    print(f"\n[BATCH UPGRADE] Scanning {parent_dir}")
+    candidates = sorted(p for p in parent_dir.iterdir() if p.is_dir())
+    upgraded = 0
+    skipped: list = []
 
-   Task(
-       subagent_type="discovery",
-       prompt="Detect tech stack and create supervisors for {project_name}"
-   )
+    for child in candidates:
+        if not (child / ".beads").is_dir():
+            skipped.append((child.name, "no .beads/"))
+            continue
+        print(f"\n{'#' * 60}\n# {child.name}\n{'#' * 60}")
+        try:
+            rc = bootstrap_project(
+                project_dir=child, project_name=None, with_rules=with_rules,
+                lang=lang, force=force, upgrade=True, dry_run=dry_run,
+            )
+            if rc == 0:
+                upgraded += 1
+            else:
+                skipped.append((child.name, f"exit {rc}"))
+        except Exception as e:
+            skipped.append((child.name, f"exception: {e}"))
 
-   This will:
-   - Scan package.json, requirements.txt, Dockerfile, etc.
-   - Fetch matching specialists from external agents directory
-   - Inject beads workflow at the beginning of each agent
-   - Write supervisors to .claude/agents/
+    print("\n" + "=" * 60)
+    print(f"BATCH UPGRADE SUMMARY: {upgraded} upgraded, {len(skipped)} skipped")
+    print("=" * 60)
+    for name, reason in skipped:
+        print(f"  - {name}: {reason}")
+    return 0
 
-3. Create your first bead:
-   bd create "First task"
 
-4. Dispatch work to supervisors:
-   Task(subagent_type="<supervisor-name>", prompt="BEAD_ID: BD-001\\n\\nImplement...")
+def main():
+    import argparse
 
-NOTE: Read-only agents (scout, detective, architect, scribe, code-reviewer)
-are delegated via provider_delegator MCP (Codex → Gemini fallback).
-Supervisors are sourced from https://github.com/ayush-that/sub-agents.directory
-with beads workflow injected.
-""")
+    parser = argparse.ArgumentParser(description="Bootstrap beads orchestration")
+    parser.add_argument("--project-name", default=None, help="Project name (auto-inferred if not provided)")
+    parser.add_argument("--project-dir", default=".", help="Project directory")
+    parser.add_argument("--with-rules", action="store_true", help="Also copy dev rules (implementation-standard, logging, tdd)")
+    parser.add_argument("--lang", default="en", choices=["en", "ru"], help="Language for dev rules (default: en)")
+    parser.add_argument("--force", action="store_true", help="Overwrite all files regardless of user modifications")
+    parser.add_argument("--upgrade", action="store_true", help="Run init flow then cleanup obsolete items (uses existing manifest)")
+    parser.add_argument("--dry-run", action="store_true", help="Print plan without writing anything")
+    parser.add_argument("--all", dest="all_parent", default=None, metavar="PARENT_DIR", help="Batch upgrade: iterate direct subdirs of PARENT_DIR that contain .beads/. Implies --upgrade.")
+    args = parser.parse_args()
+
+    if args.all_parent:
+        parent = Path(args.all_parent).resolve()
+        sys.exit(run_batch_upgrade(
+            parent_dir=parent, with_rules=args.with_rules, lang=args.lang,
+            force=args.force, dry_run=args.dry_run,
+        ))
+
+    project_dir = Path(args.project_dir).resolve()
+    sys.exit(bootstrap_project(
+        project_dir=project_dir, project_name=args.project_name,
+        with_rules=args.with_rules, lang=args.lang, force=args.force,
+        upgrade=args.upgrade, dry_run=args.dry_run,
+    ))
 
 
 if __name__ == "__main__":

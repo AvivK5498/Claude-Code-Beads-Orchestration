@@ -1,196 +1,314 @@
 <div align="center">
 
-# THE CLAUDE PROTOCOL
+# CLAUDE PROTOCOL
 
-**Enforcement-first orchestration for Claude Code. Every agent tracked. Every decision logged. Nothing gets lost.**
+**Structure that survives context loss. Every task tracked. Every decision logged.**
 
-**Claude Code plans great. Without structure, nothing survives past one session.**
-
-[![npm version](https://img.shields.io/npm/v/beads-orchestration?style=for-the-badge&logo=npm&logoColor=white&color=CB3837)](https://www.npmjs.com/package/beads-orchestration)
-[![GitHub stars](https://img.shields.io/github/stars/AvivK5498/The-Claude-Protocol?style=for-the-badge&logo=github&color=181717)](https://github.com/AvivK5498/The-Claude-Protocol)
+[![npm version](https://img.shields.io/npm/v/claude-protocol?style=for-the-badge&logo=npm&logoColor=white&color=CB3837)](https://www.npmjs.com/package/claude-protocol)
+[![GitHub stars](https://img.shields.io/github/stars/weselow/claude-protocol?style=for-the-badge&logo=github&color=181717)](https://github.com/weselow/claude-protocol)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=for-the-badge)](LICENSE)
 
 <br>
 
 ```bash
-npx skills add AvivK5498/The-Claude-Protocol
+npx claude-protocol init
 ```
 
-**macOS and Linux.**
+<br>
+
+![The Claude Protocol](screenshots/kanbanui.png)
 
 <br>
 
-![The Claude Protocol — Kanban UI](screenshots/kanbanui.png)
+[Why](#why) · [What Changed](#what-changed-in-v3) · [How It Works](#how-it-works) · [Installation](#installation) · [Workflow](#workflow) · [Hooks](#hooks) · [FAQ](#faq)
 
-<br>
-
-[Why This Exists](#why-this-exists) · [How It Works](#how-it-works) · [Getting Started](#getting-started) · [Hooks](#hooks)
+**[Русская версия](README-ru.md)**
 
 </div>
 
 ---
 
-## Why This Exists
+## Why
 
-Claude Code is the best coding agent out there. But let it run unsupervised and you get agents editing main, commits without PRs, lost context every session, and zero traceability on what was done and why.
+Claude Code loses context. Plans disappear after compaction. Tasks are forgotten between sessions. Changes go straight to main with no traceability.
 
-Plan mode helps — until you need to coordinate across files, track what was planned vs what shipped, or pick up a task three sessions later. Plans vanish. Context resets. Investigation gets redone from scratch.
+Claude Protocol fixes this with three things:
 
-The Claude Protocol is the enforcement layer. It wraps Claude Code with 13 hooks that physically block bad actions, isolates every task in its own git worktree, and documents everything automatically — dispatch prompts, agent knowledge, decisions, all of it. [Beads](https://github.com/steveyegge/beads) (git-native tickets) track every unit of work from creation to merge.
+- **Beads** — persistent task tracking. One task = one worktree = one PR. Survives restarts and compaction.
+- **Hooks** — enforcement, not instructions. Edits on main are blocked. Completion without checklist is blocked. `git --no-verify` is blocked.
+- **bd prime** — session start hook loads recent beads so state survives context loss.
 
-The complexity is in the system. What you see: Claude plans with you, you approve, agents execute in isolation, PRs get merged. Done.
+Constraints over instructions. What's blocked can't be ignored.
 
----
+## Origin
+
+This project started as a fork of [The Claude Protocol](https://github.com/AvivK5498/The-Claude-Protocol) by Aviv Kaplan. The original author appears to have stopped development — PRs go unreviewed, and the underlying tools (beads CLI, Claude Code hooks API) have changed significantly.
+
+v3 is a ground-up rewrite. Different architecture, different philosophy. See [decisions.md](docs/decisions-en.md) for full rationale.
+
+## What Changed in v3
+
+### v3.3.0 (2026-04-22)
+
+- **Upgrade mechanism** — new `npx claude-protocol upgrade` command with
+  `--dry-run` and `--all <parent>` for batch runs across workspaces. Every
+  removal is backed up to `.claude/.upgrades/<timestamp>/`.
+- **Memory system removed** — `knowledge.jsonl`, `memory-capture.cjs`, and
+  `recall.cjs` are gone. bd's native `bd remember` / `bd memories` takes
+  over. Legacy files are cleaned up automatically during upgrade.
+- **bd 1.0.2 compatibility** — bd repo moved to gastownhall; install URLs
+  updated. Workflow no longer uses the obsolete `inreview` status.
+- **Path traversal guard** — upgrade never writes or deletes outside the
+  project directory.
+
+Stripped everything that doesn't improve output. Added everything that does.
+
+**Removed:**
+- 5 specialized agents (Scout, Detective, Architect, Scribe, Discovery) — duplicated built-in Claude Code capabilities
+- Per-tech supervisor generation — 500+ lines of context per stack, Claude already knows these technologies
+- Agent personas ("Rex the reviewer") — based on outdated prompting patterns, just fills context
+- MCP Provider Delegator, Kanban UI, Web Interface Guidelines — unnecessary infrastructure
+- 19 bash hooks — replaced with 8 cross-platform Node.js hooks
+
+**Added:**
+- Checklist verification — hook blocks completion if requirements from description aren't checked off
+- Session-start dashboard — shows open tasks, merged PRs awaiting cleanup, stale beads, recent knowledge
+- Mandatory size check — automatic decision: single bead or epic with children
+- Plan-to-beads requirement — all planned tasks must be created as beads before implementation starts
+- LEARNED quality enforcement — specific format: problem → solution → context
+- Safe install and upgrade — SHA-256 manifest tracks user modifications, `--force` for clean reinstall
+- bd command reference in rules — prevents Claude from inventing nonexistent commands
+
+**Changed:**
+- Rules are trigger-based ("when you create an API endpoint → add logging") instead of reference documents
+- Knowledge base search is mandatory before every investigation
+- Dev rules (implementation, logging, TDD) included by default
+
+Full details: [docs/decisions-en.md](docs/decisions-en.md)
 
 ## How It Works
 
-```
-┌─────────────────────────────────────────┐
-│         ORCHESTRATOR (Co-Pilot)         │
-│  Plans with you (Plan mode)            │
-│  Investigates with Grep/Read/Glob       │
-│  Delegates implementation via Task()    │
-└──────────────────┬──────────────────────┘
-                   │
-       ┌───────────┼───────────┐
-       ▼           ▼           ▼
-  ┌─────────┐ ┌─────────┐ ┌─────────┐
-  │ react-  │ │ python- │ │ nextjs- │
-  │supervisor│ │supervisor│ │supervisor│
-  └────┬────┘ └────┬────┘ └────┬────┘
-       │           │           │
-  .worktrees/ .worktrees/ .worktrees/
-  bd-BD-001   bd-BD-002   bd-BD-003
-```
-
-**The orchestrator** investigates, discusses with you, and plans. It never writes code. Dispatch prompts are auto-logged to the bead so nothing gets lost.
-
-**Supervisors** are created automatically based on your tech stack. They read bead comments for full context, work in isolated worktrees, and push clean PRs.
-
-**Beads** are git-native tickets. Every task, every epic, every dependency — tracked in your repo, not a third-party service. One bead = one unit of work = one worktree = one PR.
-
-### Workflow
-
-**Standalone** — Investigate → plan → approve → create bead → dispatch supervisor → worktree → PR → merge.
-
-**Epics** — Cross-domain work (DB + API + frontend) becomes an epic with enforced child dependencies. Each child gets its own worktree. Dependencies prevent dispatching out of order.
-
-**Quick Fix** — For trivial changes (<10 lines), the orchestrator can edit directly on a feature branch. The hook prompts the user for approval with file name and change size. Hard blocked on main — must use bead workflow there.
-
-Every task goes through beads — unless the user explicitly approves a quick fix.
-
-### Kanban UI
-
-The Claude Protocol pairs with the [Beads Kanban UI](https://github.com/AvivK5498/Beads-Kanban-UI) for visual task management and GitOps directly from the browser. Track epics, subtasks, dependencies, and PR status across columns — without leaving the board.
-
----
-
-## Getting Started
-
-```bash
-npx skills add AvivK5498/The-Claude-Protocol
-```
-
-Or via npm:
-
-```bash
-npm install -g beads-orchestration
-```
-
-Then in any Claude Code session:
-
-```bash
-/create-beads-orchestration
-```
-
-The skill walks you through setup, scans your tech stack, and creates supervisors with best practices injected.
-
-### Requirements
-
-- Claude Code with hooks support
-- Node.js (for npx)
-- Python 3 (for bootstrap)
-- beads CLI (installed automatically)
-
----
-
-## What Makes This Different
-
-### Enforcement, Not Suggestions
-
-13 hooks across 5 lifecycle events. They don't warn — they block. The orchestrator can't edit code on main. Supervisors can't skip beads. Epics can't close with open children. `git commit --no-verify` is blocked — pre-commit hooks always run.
-
-### Investigation-First, Constraint-Driven
-
-The orchestrator must read the actual source file before delegating — no guessing. Constraints ("never dispatch without reading the source") outperform instructions ("remember to investigate"), inspired by [Cursor's multi-agent research](https://cursor.com/blog/self-driving-codebases). The orchestrator also maintains persistent memory across sessions.
-
-### Documentation That Writes Itself
-
-Every supervisor dispatch prompt is automatically captured as a bead comment. Agents voluntarily log conventions and gotchas into a persistent knowledge base. Session start surfaces recent knowledge so agents don't re-investigate solved problems.
-
-```bash
-# Agent captures an insight
-bd comment BD-001 "LEARNED: TaskGroup requires @Sendable closures in strict concurrency mode."
-
-# Search the knowledge base
-.beads/memory/recall.sh "concurrency"
-```
-
-### Follow-Up Traceability
-
-Closed beads are immutable. Bug fixes become new beads linked via `bd dep relate` — full history, no reopening. Merged branches don't get reused. Each fix gets its own worktree and PR.
-
----
-
-## What Gets Installed
+### What gets installed
 
 ```
 .claude/
-├── agents/           # Supervisors (auto-created for your tech stack)
-├── hooks/            # Workflow enforcement (13 hooks)
-├── skills/           # subagents-discipline, react-best-practices
-└── settings.json
-CLAUDE.md             # Orchestrator instructions
-.beads/               # Task database
-  memory/             # Knowledge base (knowledge.jsonl + recall.sh)
-.worktrees/           # Isolated worktrees per task (created dynamically)
+  agents/
+    code-reviewer.md        # Adversarial 3-phase review
+    merge-supervisor.md     # Conflict resolution protocol
+  hooks/                    # 8 Node.js enforcement hooks
+  rules/
+    beads-workflow.md       # Task lifecycle, bd command reference
+    implementation-standard.md
+    logging-standard.md
+    tdd-workflow.md
+    resilience-standard.md
+  skills/
+    project-discovery/      # Extracts project conventions
+  settings.json             # Hook configuration
+  .manifest.json            # File hashes for safe upgrades
+CLAUDE.md                   # Orchestrator instructions
+.beads/                     # Task database + knowledge base
 ```
 
----
+### Safe for existing projects — and for upgrades
+
+First install and re-install use the same command: `npx claude-protocol init`.
+
+- **Hooks and skills** — always updated to the latest version (enforcement code).
+- **Rules and agents** — updated only if you haven't modified them. Modified files are preserved; the new version is saved to `.claude/.upgrades/` for manual review.
+- **CLAUDE.md** — beads section appended if missing. Original content preserved.
+- **settings.json** — hooks merged by event type. Your existing hooks stay.
+- **.gitignore** — missing entries appended. Nothing removed.
+
+Use `--force` to overwrite all files regardless of modifications.
+
+### What happens at session start
+
+Every time you start Claude Code, the `session-start` hook shows:
+
+- **ACTION REQUIRED** — merged worktrees with unclosed beads, stale `inreview` tasks
+- **In Progress** — beads to resume
+- **Ready** — unblocked beads available for dispatch
+- **Blocked / Stale** — beads waiting on dependencies or inactive for 3+ days
+- **Recent Knowledge** — last 5 LEARNED entries from the knowledge base
+- **Open PRs** — your PRs awaiting review
+
+No manual checking. Context is rebuilt automatically.
+
+### Project discovery
+
+After installation, run `/project-discovery` in Claude Code. It scans your codebase and writes `.claude/rules/project-conventions.md` with:
+
+- Tech stack and frameworks detected
+- Naming conventions and patterns
+- Testing setup and commands
+- Anti-patterns specific to your project
+
+This file is auto-loaded into every agent context. No per-tech supervisor generation needed.
+
+## Installation
+
+### Prerequisites
+
+- Python 3.11+
+- Node.js 20+
+- git
+
+### Install
+
+```bash
+npx claude-protocol init
+```
+
+Restart Claude Code. Run `/project-discovery`.
+
+### Options
+
+| Flag | Description |
+|------|-------------|
+| `--project-dir PATH` | Target directory (default: current) |
+| `--project-name NAME` | Project name for CLAUDE.md (auto-inferred from package.json / pyproject.toml / Cargo.toml / go.mod) |
+| `--no-rules` | Skip dev rules (implementation, logging, TDD, resilience) |
+| `--lang en\|ru` | Language for dev rules (default: en) |
+| `--force` | Overwrite all files, including user-modified (for clean reinstall) |
+
+### Local development (before npm publish)
+
+```bash
+cd /path/to/claude-protocol && npm link
+npx claude-protocol init  # works in any project
+```
+
+## Upgrade
+
+Existing projects upgrade safely — user-modified files are preserved; only
+claude-protocol's own artifacts are cleaned up.
+
+### Preview (recommended first)
+
+```bash
+npx claude-protocol@latest upgrade --dry-run
+```
+
+Prints the exact list of files, directories, and settings-hook entries that
+would change. Touches nothing.
+
+### Apply
+
+```bash
+npx claude-protocol@latest upgrade
+```
+
+Runs the init flow and then strips obsolete artifacts. Every removal is
+backed up under `.claude/.upgrades/<UTC-timestamp>/` so you can roll back by
+copying files out of the backup directory.
+
+### Batch (multiple projects)
+
+```bash
+npx claude-protocol@latest upgrade --all /path/to/parent
+```
+
+Iterates every direct subdirectory of the parent that contains a `.beads/`
+folder and upgrades each one. Combine with `--dry-run` to audit before
+applying.
+
+### Rollback
+
+The backup directory `.claude/.upgrades/<timestamp>/obsolete/` mirrors the
+project tree. Copy the file(s) you want back into place. Nothing is ever
+hard-deleted.
+
+## Workflow
+
+### Every task goes through beads
+
+```
+Plan → Size check → Create beads → bd ready → Dispatch → Worktree → PR → Merge → Close
+```
+
+**Size check** runs automatically before creating beads:
+- More than 3 files or multiple domains (DB + API + frontend) → epic with children
+- More than 50 lines estimated → consider splitting
+- Otherwise → single bead
+
+One bead = one worktree = one PR = one reviewable diff.
+
+### Parallel work
+
+```bash
+bd dep add TASK-2 TASK-1    # TASK-2 is blocked by TASK-1
+bd close TASK-1              # TASK-2 becomes ready
+bd ready                     # shows all unblocked tasks
+```
+
+Orchestrator dispatches all ready tasks in parallel via `Task()`.
+
+### Quick fix
+
+For changes under 10 lines on a feature branch. Hard blocked on main.
+
+```bash
+git checkout -b fix-typo     # must be off main
+# edit → hook asks for confirmation → commit
+```
+
+### Completion verification
+
+Subagents are blocked from finishing unless:
+- `Checklist:` section present with all `[x]` items checked
+- Bead status set to `inreview`
+- Code committed and pushed
+- Comment left on bead
+- Response within verbosity limits (25 lines / 1200 chars)
 
 ## Hooks
 
-13 hooks enforce every workflow step. They block before bad actions happen, auto-log after good ones, and validate before supervisors exit.
+| Hook | Event | Enforcement |
+|------|-------|-------------|
+| enforce-branch-before-edit | PreToolUse (Edit/Write) | Blocks edits on main. Asks confirmation on feature branches with file name and change size. |
+| bash-guard | PreToolUse (Bash) | Blocks `--no-verify`. Requires description on `bd create`. Validates epic close (all children done, PR merged). |
+| validate-completion | SubagentStop | Checks worktree, push, status, checklist, comment, verbosity. |
+| memory-capture | PostToolUse (Bash) | Extracts LEARNED entries → `.beads/memory/knowledge.jsonl` with auto-tags. |
+| session-start | SessionStart | Surfaces tasks, merged PRs, knowledge, ACTION REQUIRED reminders. |
+| nudge-claude-md-update | PreCompact | Reminds to update CLAUDE.md before context compaction. |
+| hook-utils | — | Shared utilities: getField, parseBeadId, deny/ask/block, execCommand. |
+| recall | — | Knowledge base search: `node .beads/memory/recall.cjs "keyword"`. |
 
-**PreToolUse** (7 hooks) — Block orchestrator from writing code on main. Prompt for quick-fix approval on feature branches. Block `--no-verify` on commits. Allow memory file writes. Require beads for supervisor dispatch. Enforce worktree isolation. Block closing epics with open children. Enforce sequential dependency dispatch.
+## Dev Rules
 
-**PostToolUse** (3 hooks) — Auto-log dispatch prompts as bead comments. Capture knowledge base entries. Enforce concise supervisor responses.
+Included by default. Skip with `--no-rules`. Russian version: `npx claude-protocol init --lang ru`.
 
-**SubagentStop** (1 hook) — Verify worktree exists, code is pushed, bead status is updated.
+| Rule | What it does |
+|------|-------------|
+| implementation-standard | Dev process with user confirmation. Code metrics (function < 30 lines, class < 200, nesting < 4). Self-review with `/simplify` trigger. |
+| logging-standard | Trigger-based: "creating API endpoint → add logging". Covers external calls, payments, auth, background jobs. Sentry + Seq. |
+| tdd-workflow | Trigger-based: "new function → write test first". RED → GREEN → REFACTOR cycle. Clear exceptions (configs, DTOs, migrations). |
+| resilience-standard | Trigger-based: "calling external API → what if timeout/5xx?". Covers DB, payments, files, background jobs. Strategies: retry, fallback, circuit breaker, compensation. |
 
-**SessionStart** (1 hook) — Surface task status, recent knowledge, and cleanup suggestions.
+## FAQ
 
-**UserPromptSubmit** (1 hook) — Prompt for clarification on ambiguous requests.
+**Q: `bd init` hangs during installation.**
+A: Dolt server is not running. Bootstrap creates `.beads/` manually after 15s timeout. Run `bd init` later when Dolt is available, or use SQLite backend.
 
----
+**Q: Hooks don't work after installation.**
+A: Restart Claude Code. Hooks load from `settings.json` at startup.
 
-## Advanced: External Providers
+**Q: Claude invents commands like `bd export`.**
+A: `beads-workflow.md` includes a full command reference table. If Claude still invents commands, it didn't read the rules — check that `.claude/rules/` exists.
 
-By default, all agents run via Claude's Task(). To delegate read-only agents (scout, detective, etc.) to Codex/Gemini:
+**Q: What happens if I run `init` again after updating claude-protocol?**
+A: Modified rules and agents are preserved — new versions go to `.claude/.upgrades/` for you to review. Hooks and skills are always updated. Use `--force` for a clean reinstall.
 
-```bash
-/create-beads-orchestration --external-providers
-```
+**Q: Can I use this without Dolt?**
+A: Yes. Beads works with SQLite by default. Dolt adds version history and branching for the task database.
 
-Requires Codex CLI (`codex login`), optionally Gemini CLI, and [uv](https://github.com/astral-sh/uv).
+## Credits
 
----
+- [The Claude Protocol](https://github.com/AvivK5498/The-Claude-Protocol) by Aviv Kaplan — original project
+- [beads](https://github.com/steveyegge/beads) by Steve Yegge — git-native task tracking
+- [`/simplify`](https://github.com/anthropics/claude-code-skills) by Boris Cherny — code simplification skill
 
 ## License
 
 MIT
-
-## Credits
-
-- [beads](https://github.com/steveyegge/beads) — Git-native task tracking by Steve Yegge
-- [sub-agents.directory](https://github.com/ayush-that/sub-agents.directory) — External agent templates

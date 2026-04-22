@@ -1,37 +1,36 @@
 {
-  "name": "beads-orchestration",
-  "version": "2.2.0",
-  "description": "Multi-agent orchestration for Claude Code with automatic task management",
-  "author": "Aviv Kaplan",
+  "name": "claude-protocol",
+  "version": "3.3.1",
+  "description": "Enforcement-first orchestration for Claude Code: beads task tracking, worktree isolation, hooks, and knowledge base",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/AvivK5498/The-Claude-Protocol"
+    "url": "https://github.com/weselow/claude-protocol"
   },
   "keywords": [
     "claude",
     "claude-code",
     "orchestration",
-    "ai-agents",
     "task-management",
-    "beads"
+    "beads",
+    "hooks",
+    "worktree"
   ],
-  "os": [
-    "darwin",
-    "linux"
-  ],
-  "scripts": {
-    "postinstall": "node scripts/postinstall.js"
-  },
   "files": [
     "scripts/",
-    "skills/",
     "templates/",
     "bootstrap.py",
-    "SKILL.md",
     "README.md"
   ],
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:py": "python -m pytest tests/test_bootstrap.py -v"
+  },
   "bin": {
-    "beads-orchestration": "./scripts/cli.js"
+    "claude-protocol": "./scripts/cli.js"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18"
   }
 }
