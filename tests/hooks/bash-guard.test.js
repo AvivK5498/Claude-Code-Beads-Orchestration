@@ -53,6 +53,51 @@ describe('bash-guard hook', () => {
     });
   });
 
+  describe('git worktree guard', () => {
+    it('denies git worktree add', () => {
+      const result = runHook(makeInput('git worktree add ../foo -b mybranch'));
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('deny');
+      expect(result.stdout).toContain('bd worktree create');
+    });
+
+    it('denies git worktree add with extra flags and paths', () => {
+      const result = runHook(makeInput('git worktree add --detach .worktrees/bd-1 HEAD'));
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('deny');
+    });
+
+    it('allows git worktree remove', () => {
+      const result = runHook(makeInput('git worktree remove --force .worktrees/bd-1'));
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe('');
+    });
+
+    it('allows git worktree prune', () => {
+      const result = runHook(makeInput('git worktree prune'));
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe('');
+    });
+
+    it('allows git worktree list', () => {
+      const result = runHook(makeInput('git worktree list'));
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe('');
+    });
+
+    it('does not match "add" appearing elsewhere (e.g. branch named add)', () => {
+      const result = runHook(makeInput('git worktree remove add-feature'));
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe('');
+    });
+
+    it('does not block plain git add', () => {
+      const result = runHook(makeInput('git add -A'));
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe('');
+    });
+  });
+
   describe('bd create validation', () => {
     it('denies bd create without description', () => {
       const result = runHook(makeInput('bd create --title="My task"'));

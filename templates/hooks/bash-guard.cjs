@@ -37,6 +37,21 @@ runHook('bash-guard', () => {
         'Run the commit without --no-verify and fix any issues.'
       );
     }
+
+    // Block raw `git worktree add` — it creates a shadow .beads/ (process leak,
+    // data loss). Match by argument structure (subcommand=worktree, action=add),
+    // not a naive includes('add'), so branch/path names containing "add" and
+    // `git worktree remove`/`prune`/`list` are unaffected.
+    const gitArgs = command.split(/\s+/).filter(Boolean).slice(1);
+    if (gitArgs[0] === 'worktree' && gitArgs[1] === 'add') {
+      deny(
+        'git worktree add is blocked — use `bd worktree create` instead.\n\n' +
+        'Raw `git worktree add` creates a shadow .beads/ copy (process leak, data loss).\n' +
+        'For removing worktrees, raw `git worktree remove` is allowed ' +
+        '(bd worktree remove is broken on Windows, see u51).'
+      );
+    }
+
     process.exit(0);
   }
 
