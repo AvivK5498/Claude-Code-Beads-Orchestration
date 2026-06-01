@@ -14,6 +14,7 @@ from bootstrap import (
     infer_project_name,
     copy_and_replace,
     setup_gitignore,
+    configure_beads_export,
     _from_package_json,
     _from_pyproject,
     _from_cargo,
@@ -197,8 +198,24 @@ class TestSetupGitignore:
         gitignore = tmp_path / ".gitignore"
         assert gitignore.exists()
         content = gitignore.read_text()
-        assert ".beads/" in content
         assert ".worktrees/" in content
+        assert "/issues.jsonl" in content
+
+    def test_does_not_ignore_whole_beads_dir(self, tmp_path, capsys):
+        """The tracker travels with the repo — .beads/ must NOT be ignored
+        (that would hide the canonical .beads/issues.jsonl)."""
+        setup_gitignore(tmp_path)
+
+        lines = (tmp_path / ".gitignore").read_text().splitlines()
+        assert ".beads/" not in lines
+        assert ".beads" not in lines
+
+    def test_ignores_root_issues_jsonl(self, tmp_path, capsys):
+        """A stray /issues.jsonl export at repo root must be ignored."""
+        setup_gitignore(tmp_path)
+
+        content = (tmp_path / ".gitignore").read_text()
+        assert "/issues.jsonl" in content
 
     def test_appends_missing_entries(self, tmp_path, capsys):
         gitignore = tmp_path / ".gitignore"
@@ -209,18 +226,21 @@ class TestSetupGitignore:
         content = gitignore.read_text()
         assert "node_modules/" in content
         assert ".env" in content
-        assert ".beads/" in content
         assert ".worktrees/" in content
+        assert "/issues.jsonl" in content
 
     def test_skips_when_already_configured(self, tmp_path, capsys):
         gitignore = tmp_path / ".gitignore"
-        gitignore.write_text("node_modules/\n.beads/\n.worktrees/\n")
+        gitignore.write_text(
+            "node_modules/\n.worktrees/\n.claude/.upgrades/\n/issues.jsonl\n"
+        )
 
         setup_gitignore(tmp_path)
 
         content = gitignore.read_text()
         # Should not duplicate entries
-        assert content.count(".beads/") == 1
+        assert content.count(".worktrees/") == 1
+        assert content.count("/issues.jsonl") == 1
 
     def test_adds_newline_if_missing(self, tmp_path, capsys):
         gitignore = tmp_path / ".gitignore"
@@ -229,19 +249,29 @@ class TestSetupGitignore:
         setup_gitignore(tmp_path)
 
         content = gitignore.read_text()
-        assert ".beads/" in content
+        assert ".worktrees/" in content
         # Should have added a newline before the section
         assert "node_modules/\n" in content
 
+    def test_idempotent_no_duplicates(self, tmp_path, capsys):
+        """Running setup_gitignore twice must not duplicate any entry."""
+        setup_gitignore(tmp_path)
+        setup_gitignore(tmp_path)
+
+        content = (tmp_path / ".gitignore").read_text()
+        assert content.count(".worktrees/") == 1
+        assert content.count("/issues.jsonl") == 1
+        assert content.count(".claude/.upgrades/") == 1
+
     def test_detects_entries_without_trailing_slash(self, tmp_path, capsys):
         gitignore = tmp_path / ".gitignore"
-        gitignore.write_text(".beads\n.worktrees\n.claude/.upgrades\n")
+        gitignore.write_text(".worktrees\n.claude/.upgrades\n/issues.jsonl\n")
 
         setup_gitignore(tmp_path)
 
         content = gitignore.read_text()
-        # Should detect ".beads" matches ".beads/" and not add duplicate
-        assert content.count("beads") == 1
+        # Should detect ".worktrees" matches ".worktrees/" and not add duplicate
+        assert content.count(".worktrees") == 1
 
     def test_adds_upgrades_entry_on_first_run(self, tmp_path, capsys):
         """setup_gitignore writes .claude/.upgrades/ when it's missing."""
@@ -260,6 +290,69 @@ class TestSetupGitignore:
 
         content = (tmp_path / ".gitignore").read_text()
         assert content.count(".claude/.upgrades/") == 1
+
+
+# ============================================================================
+# configure_beads_export
+# ============================================================================
+
+class TestConfigureBeadsExport:
+    def test_runs_bd_config_set_git_add_false(self, tmp_path, monkeypatch, capsys):
+        """Should call `bd config set export.git-add false` in the project dir."""
+        calls = []
+
+        class FakeResult:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def fake_run(cmd, **kwargs):
+            calls.append((cmd, kwargs.get("cwd")))
+            return FakeResult()
+
+        monkeypatch.setattr(bootstrap.subprocess, "run", fake_run)
+        monkeypatch.setattr(bootstrap.shutil, "which", lambda _: "/usr/bin/bd")
+
+        result = configure_beads_export(tmp_path)
+
+        assert result is True
+        assert calls == [
+            (["bd", "config", "set", "export.git-add", "false"], tmp_path)
+        ]
+
+    def test_returns_false_when_bd_missing(self, tmp_path, monkeypatch, capsys):
+        """If bd is not on PATH, do not crash — return False."""
+        monkeypatch.setattr(bootstrap.shutil, "which", lambda _: None)
+
+        result = configure_beads_export(tmp_path)
+
+        assert result is False
+
+    def test_does_not_raise_on_nonzero_exit(self, tmp_path, monkeypatch, capsys):
+        """A failing bd config must not raise — log and return False."""
+        class FakeResult:
+            returncode = 1
+            stdout = ""
+            stderr = "boom"
+
+        monkeypatch.setattr(bootstrap.subprocess, "run", lambda *a, **k: FakeResult())
+        monkeypatch.setattr(bootstrap.shutil, "which", lambda _: "/usr/bin/bd")
+
+        result = configure_beads_export(tmp_path)
+
+        assert result is False
+
+    def test_does_not_raise_on_timeout(self, tmp_path, monkeypatch, capsys):
+        """A timeout must not raise — log and return False."""
+        def fake_run(*a, **k):
+            raise bootstrap.subprocess.TimeoutExpired(cmd="bd", timeout=15)
+
+        monkeypatch.setattr(bootstrap.subprocess, "run", fake_run)
+        monkeypatch.setattr(bootstrap.shutil, "which", lambda _: "/usr/bin/bd")
+
+        result = configure_beads_export(tmp_path)
+
+        assert result is False
 
 
 # ============================================================================

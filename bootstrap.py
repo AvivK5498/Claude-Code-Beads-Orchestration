@@ -584,7 +584,44 @@ def install_beads(project_dir: Path) -> bool:
             (beads_dir / "issues.jsonl").touch()
             print("  - Created .beads manually (run 'bd init' later with Dolt server running)")
 
+    # Stop bd's pre-commit shim from force-staging issues.jsonl (bd >=1.0.2
+    # defaults export.git-add=true, which re-stages the JSONL on every commit
+    # and can drop a duplicate /issues.jsonl at the repo root). Best-effort:
+    # never fail the whole bootstrap on this.
+    configure_beads_export(project_dir)
+
     print("  DONE")
+    return True
+
+
+def configure_beads_export(project_dir: Path) -> bool:
+    """Disable bd's auto-staging of issues.jsonl (export.git-add=false).
+
+    Returns True on success. Never raises — if bd is missing or the command
+    fails/times out, logs a warning and returns False so bootstrap can continue.
+    """
+    if not shutil.which("bd"):
+        print("  - bd not available, skipping export.git-add config "
+              "(run 'bd config set export.git-add false' later)")
+        return False
+    try:
+        result = subprocess.run(
+            ["bd", "config", "set", "export.git-add", "false"],
+            cwd=project_dir, capture_output=True, text=True,
+            shell=_SHELL, stdin=subprocess.DEVNULL, timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        print("  - bd config set export.git-add timed out (Dolt server not running?)")
+        return False
+    except OSError as exc:
+        print(f"  - bd config set export.git-add failed to start: {exc}")
+        return False
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        print("  - WARNING: bd config set export.git-add false failed"
+              + (f": {detail}" if detail else ""))
+        return False
+    print("  - Set export.git-add=false (prevents duplicate /issues.jsonl)")
     return True
 
 
@@ -758,14 +795,24 @@ def copy_settings_and_claude_md(project_dir: Path, project_name: str) -> None:
 
 
 def setup_gitignore(project_dir: Path) -> None:
-    """Ensure .beads/, .worktrees/, and .claude/.upgrades/ are in .gitignore."""
+    """Ensure .worktrees/, .claude/.upgrades/, and /issues.jsonl are in .gitignore.
+
+    NOTE: the beads tracker travels with the repo, so .beads/ is intentionally
+    NOT ignored — the canonical .beads/issues.jsonl must stay under git. Dolt
+    runtime/binary files are excluded by .beads/.gitignore (written by bd init).
+    /issues.jsonl guards against an export that lands at the repo root.
+    """
     print("\n[6/6] Setting up .gitignore...")
     gitignore_path = project_dir / ".gitignore"
-    entries = [".beads/", ".worktrees/", ".claude/.upgrades/"]
+    entries = [".worktrees/", ".claude/.upgrades/", "/issues.jsonl"]
 
     if gitignore_path.exists():
         content = gitignore_path.read_text(encoding='utf-8')
-        missing = [e for e in entries if e not in content and e.rstrip("/") not in content]
+        lines = content.splitlines()
+        missing = [
+            e for e in entries
+            if e not in lines and e.rstrip("/") not in lines
+        ]
         if missing:
             with open(gitignore_path, "a", encoding="utf-8") as f:
                 if content and not content.endswith("\n"):
@@ -778,7 +825,7 @@ def setup_gitignore(project_dir: Path) -> None:
             print("  - Already configured")
     else:
         gitignore_path.write_text(
-            "# Beads orchestration\n.beads/\n.worktrees/\n.claude/.upgrades/\n",
+            "# Beads orchestration\n.worktrees/\n.claude/.upgrades/\n/issues.jsonl\n",
             encoding='utf-8',
         )
         print("  - Created .gitignore")
