@@ -51,19 +51,23 @@ bd create "Fix: [what]" -d "Discovered while working on {CURRENT_BEAD}: [details
 ## Начало задачи
 
 1. Распарси BEAD_ID из dispatch-промпта
-2. Создай worktree (ОБЯЗАТЕЛЬНО через bd, не через raw git — см. Banned):
+2. Создай рабочую копию (git worktree — отдельная рабочая папка одного репозитория) (ОБЯЗАТЕЛЬНО через bd, не через сырой git — см. Banned):
    ```bash
    bd worktree create .worktrees/bd-{BEAD_ID} --branch bd-{BEAD_ID}
    cd .worktrees/bd-{BEAD_ID}
    ```
-   Это создаёт `.beads/redirect`, указывающий на основной `.beads/` — все bd команды используют единый dolt-сервер из главного репо. Raw `git worktree add` создал бы теневую копию `.beads/` со своим dolt-сервером, что ведёт к утечке процессов и потере данных.
+   В bd 1.0.2 и новее рабочая копия сама находит общую базу через общий git-каталог (`git-common-dir`) — файл `.beads/redirect` больше не нужен (устарел). Все команды bd изнутри рабочей копии работают с единой общей базой из главного репозитория.
+
+   **Метки `none` / `local (no redirect)` — это норма.** `bd worktree list` показывает `none`, а `bd worktree info` показывает `local (no redirect)` — это косметические надписи. База при этом общая (`bd list` изнутри свежей рабочей копии видит общие задачи). НЕ считай `none`/`local` признаком поломки.
+
+   **Защита от случайного файла `.beads/issues.jsonl` в рабочей копии** — это настройка `export.git-add false` плюс `/issues.jsonl` в `.gitignore` (всё это делает бутстрап), а НЕ проверка того, общая ли база у копии.
 3. Пометь in progress: `bd update {BEAD_ID} --status in_progress`
 4. Если это ребёнок epic — проверь статус epic. Если epic ещё `open`, пометь и его: `bd update {EPIC_ID} --status in_progress`
 5. Прочти контекст bead: `bd show {BEAD_ID}` и `bd comments {BEAD_ID}`
 
 ## Во время реализации
 
-- Работай ТОЛЬКО в своём worktree: `.worktrees/bd-{BEAD_ID}/`
+- Работай ТОЛЬКО в своей рабочей копии: `.worktrees/bd-{BEAD_ID}/`
 - Коммить часто с понятными сообщениями
 - Логируй прогресс: `bd comments add {BEAD_ID} "Completed X, working on Y"`
 
@@ -98,5 +102,6 @@ CLI: `bd prime` для общего обзора, `bd <cmd> --help` для де�
 - Работа напрямую в ветке main
 - Реализация без BEAD_ID
 - Мерж своей ветки (пользователь мержит через PR)
-- Редактирование файлов вне своего worktree
-- Raw `git worktree add` / `git worktree remove` — ОБЯЗАТЕЛЬНО использовать `bd worktree create` / `bd worktree remove`. Raw git worktree создаёт теневые копии `.beads/`, плодит orphan процессы dolt-server, блокирует удаление файлов и теряет данные beads. См.: документация по механизму `.beads/redirect`.
+- Редактирование файлов вне своей рабочей копии
+- Сырой `git worktree add` — ОБЯЗАТЕЛЬНО использовать `bd worktree create`. Сырой `git worktree add` создаёт теневую копию `.beads/`, плодит брошенные процессы dolt-server, блокирует удаление файлов и теряет данные beads.
+- Для УДАЛЕНИЯ рабочей копии сырой `git worktree remove --force` с последующим `git worktree prune` разрешён — `bd worktree remove` сломан на Windows (баг u51). (Создавать копию по-прежнему только через `bd worktree create`: именно создание подключает общую базу.)

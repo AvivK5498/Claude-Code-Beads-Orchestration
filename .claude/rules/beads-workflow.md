@@ -56,7 +56,11 @@ Don't try to fix it now (unless trivial). Create the bead so it's not forgotten.
    bd worktree create .worktrees/bd-{BEAD_ID} --branch bd-{BEAD_ID}
    cd .worktrees/bd-{BEAD_ID}
    ```
-   This creates `.beads/redirect` pointing to the main `.beads/` — all bd commands use the single dolt server from the main repo. Raw `git worktree add` would create a shadow `.beads/` copy with its own dolt server, causing process leaks and data loss.
+   In bd 1.0.2+ the worktree auto-detects the shared database via the common git directory (`git-common-dir`) — no `.beads/redirect` file is needed (it is obsolete). All bd commands from inside the worktree operate on the single shared database from the main repo.
+
+   **Status labels `none` / `local (no redirect)` are normal.** `bd worktree list` shows `none` and `bd worktree info` shows `local (no redirect)` — these are cosmetic. The database is still shared (`bd list` from inside a fresh worktree sees the shared tasks). Do NOT treat `none`/`local` as a sign of breakage.
+
+   **Protection against a stray `.beads/issues.jsonl` in the worktree** is `export.git-add false` plus `/issues.jsonl` in `.gitignore` (set up by bootstrap) — NOT a check of the worktree's shared status.
 3. Mark in progress: `bd update {BEAD_ID} --status in_progress`
 4. If this is a child of an epic — check epic status. If epic is still `open`, mark it too: `bd update {EPIC_ID} --status in_progress`
 5. Read bead context: `bd show {BEAD_ID}` and `bd comments {BEAD_ID}`
@@ -99,4 +103,5 @@ CLI: `bd prime` for overview, `bd <cmd> --help` for details
 - Implementing without BEAD_ID
 - Merging your own branch (user merges via PR)
 - Editing files outside your worktree
-- Raw `git worktree add` / `git worktree remove` — MUST use `bd worktree create` / `bd worktree remove`. Raw git worktree creates shadow `.beads/` copies, spawns orphan dolt-server processes, blocks file deletion, and loses bead data. See: docs on `.beads/redirect` mechanism.
+- Raw `git worktree add` — MUST use `bd worktree create`. Raw `git worktree add` creates a shadow `.beads/` copy, spawns orphan dolt-server processes, blocks file deletion, and loses bead data.
+- For REMOVING a worktree, raw `git worktree remove --force` followed by `git worktree prune` IS allowed — `bd worktree remove` is broken on Windows (bug u51). (`bd worktree create` for creation still stands, because creation is what wires up the shared database.)
