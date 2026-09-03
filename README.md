@@ -173,7 +173,8 @@ Restart Claude Code. Run `/project-discovery`.
 | `--project-name NAME` | Project name for CLAUDE.md (auto-inferred from package.json / pyproject.toml / Cargo.toml / go.mod) |
 | `--no-rules` | Skip dev rules (implementation, logging, TDD, resilience) |
 | `--lang en\|ru` | Language for dev rules (default: en) |
-| `--force` | Overwrite all files, including user-modified (for clean reinstall) |
+| `--force` | Take our version of every file, no questions asked |
+| `--keep-mine` | Keep your version of every file you edited, no questions asked |
 
 ### Local development (before npm publish)
 
@@ -184,8 +185,15 @@ npx claude-protocol init  # works in any project
 
 ## Upgrade
 
-Existing projects upgrade safely — user-modified files are preserved; only
-claude-protocol's own artifacts are cleaned up.
+Existing projects upgrade safely: only claude-protocol's own artifacts are
+cleaned up, and every removal is backed up first.
+
+When a file you edited also changed on our side, the upgrade asks — per file,
+with a diff on request, and `K`/`T` to answer for all the rest at once. The
+version you do not choose is kept next to the file under `.claude/.upgrades/`,
+so nothing you wrote is ever lost. Where no one can answer — batch upgrades,
+CI, an agent driving the CLI — your files are kept and ours are saved beside
+them. `--force` and `--keep-mine` answer for every file up front.
 
 ### Preview (recommended first)
 
@@ -194,7 +202,8 @@ npx claude-protocol@latest upgrade --dry-run
 ```
 
 Prints the exact list of files, directories, and settings-hook entries that
-would change. Touches nothing.
+would change, and writes nothing at all — every line of the preview is
+prefixed `[DRY-RUN]`.
 
 ### Apply
 

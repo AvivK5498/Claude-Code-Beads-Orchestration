@@ -36,6 +36,7 @@ from bootstrap import (
     _manifest_key,
     _has_existing_install,
     copy_settings_and_claude_md,
+    copy_rules_and_skills,
     _hook_basename,
     _entry_key,
     canonical_hook_commands,
@@ -1620,11 +1621,13 @@ class TestExistingInstallDetection:
 class TestLanguageIsRemembered:
     def _run(self, tmp_path, monkeypatch, argv):
         seen = {}
-        monkeypatch.setattr(bootstrap, "copy_rules_and_skills",
-                            lambda pd, wr, lang, m, f: seen.setdefault("lang", lang) or [])
+
+        def record_lang(project_dir, with_rules, lang, *args, **kwargs):
+            seen.setdefault("lang", lang)
+            return []
+
         _stub_heavy_steps(monkeypatch)
-        monkeypatch.setattr(bootstrap, "copy_rules_and_skills",
-                            lambda pd, wr, lang, m, f: seen.setdefault("lang", lang) or [])
+        monkeypatch.setattr(bootstrap, "copy_rules_and_skills", record_lang)
         monkeypatch.setattr(sys, "argv", ["bootstrap.py", "--project-dir", str(tmp_path)] + argv)
         with pytest.raises(SystemExit):
             bootstrap.main()
@@ -1678,3 +1681,229 @@ class TestSettingsAndClaudeMdSafety:
         offered = tmp_path / ".claude" / ".upgrades" / "CLAUDE.md"
         assert offered.exists()
         assert "Demo" in offered.read_text(encoding="utf-8")
+
+
+# ============================================================================
+# What happens to a file the user edited
+# ============================================================================
+# Silently keeping it and dropping ours in .upgrades/ turned every upgrade into
+# homework. Now it is a question — but only where someone can answer it.
+
+
+def _modified_rule(tmp_path, name="implementation-standard.md", text="mine\n"):
+    """A project with one rule the user has edited (hash no longer matches)."""
+    rules = tmp_path / ".claude" / "rules"
+    rules.mkdir(parents=True)
+    (rules / name).write_text(text, encoding="utf-8")
+    return {"files": {f"rules/{name}": "sha256:something-else"}}
+
+
+class TestConflictPromptDecides:
+    def test_keeps_yours_by_default_on_empty_answer(self, tmp_path, monkeypatch):
+        prompt = bootstrap.ConflictPrompt(interactive=True)
+        monkeypatch.setattr("builtins.input", lambda _: "")
+        target = tmp_path / "f.md"
+        target.write_text("mine", encoding="utf-8")
+
+        assert prompt.ask("rules/x.md", target, "ours") == bootstrap.ConflictPrompt.KEEP
+
+    def test_takes_ours_on_t(self, tmp_path, monkeypatch):
+        prompt = bootstrap.ConflictPrompt(interactive=True)
+        monkeypatch.setattr("builtins.input", lambda _: "t")
+        target = tmp_path / "f.md"
+        target.write_text("mine", encoding="utf-8")
+
+        assert prompt.ask("rules/x.md", target, "ours") == bootstrap.ConflictPrompt.TAKE
+
+    def test_capital_answer_sticks_for_the_rest(self, tmp_path, monkeypatch):
+        """Eight edited rules must not mean eight questions."""
+        prompt = bootstrap.ConflictPrompt(interactive=True)
+        answers = iter(["T"])
+        monkeypatch.setattr("builtins.input", lambda _: next(answers))
+        target = tmp_path / "f.md"
+        target.write_text("mine", encoding="utf-8")
+
+        assert prompt.ask("rules/a.md", target, "ours") == bootstrap.ConflictPrompt.TAKE
+        # input() would raise StopIteration if it were consulted again
+        assert prompt.ask("rules/b.md", target, "ours") == bootstrap.ConflictPrompt.TAKE
+        assert not prompt.will_ask
+
+    def test_unknown_answer_asks_again(self, tmp_path, monkeypatch):
+        prompt = bootstrap.ConflictPrompt(interactive=True)
+        answers = iter(["what?", "t"])
+        monkeypatch.setattr("builtins.input", lambda _: next(answers))
+        target = tmp_path / "f.md"
+        target.write_text("mine", encoding="utf-8")
+
+        assert prompt.ask("rules/x.md", target, "ours") == bootstrap.ConflictPrompt.TAKE
+
+    def test_diff_then_decide(self, tmp_path, monkeypatch, capsys):
+        prompt = bootstrap.ConflictPrompt(interactive=True)
+        answers = iter(["d", "k"])
+        monkeypatch.setattr("builtins.input", lambda _: next(answers))
+        target = tmp_path / "f.md"
+        target.write_text("line one\nline two\n", encoding="utf-8")
+
+        assert prompt.ask("rules/x.md", target, "line one\nline three\n") == "keep"
+        shown = capsys.readouterr().out
+        assert "-line two" in shown and "+line three" in shown
+
+    def test_no_answer_available_keeps_yours(self, tmp_path, monkeypatch):
+        """Ctrl-C or a closed stdin must never mean 'overwrite my work'."""
+        prompt = bootstrap.ConflictPrompt(interactive=True)
+
+        def refuse(_):
+            raise EOFError
+
+        monkeypatch.setattr("builtins.input", refuse)
+        target = tmp_path / "f.md"
+        target.write_text("mine", encoding="utf-8")
+
+        assert prompt.ask("rules/x.md", target, "ours") == bootstrap.ConflictPrompt.KEEP
+
+    def test_non_interactive_never_asks(self, tmp_path, monkeypatch):
+        prompt = bootstrap.ConflictPrompt(interactive=False)
+
+        def explode(_):
+            raise AssertionError("asked a question with nobody there")
+
+        monkeypatch.setattr("builtins.input", explode)
+        target = tmp_path / "f.md"
+        target.write_text("mine", encoding="utf-8")
+
+        assert prompt.ask("rules/x.md", target, "ours") == bootstrap.ConflictPrompt.KEEP
+        assert not prompt.will_ask
+
+
+class TestNothingIsEverLost:
+    def test_keeping_yours_saves_ours_beside_it(self, tmp_path):
+        manifest = _modified_rule(tmp_path)
+        prompt = bootstrap.ConflictPrompt(interactive=False)
+
+        skipped = copy_rules_and_skills(tmp_path, True, "en", manifest, False, prompt)
+
+        rule = tmp_path / ".claude" / "rules" / "implementation-standard.md"
+        assert rule.read_text(encoding="utf-8") == "mine\n"
+        assert "rules/implementation-standard.md" in skipped
+        theirs = tmp_path / ".claude" / ".upgrades" / "rules" / "implementation-standard.md"
+        assert "IMPLEMENTATION STANDARD" in theirs.read_text(encoding="utf-8")
+
+    def test_taking_ours_saves_yours_beside_it(self, tmp_path, monkeypatch):
+        manifest = _modified_rule(tmp_path, text="my own standard\n")
+        prompt = bootstrap.ConflictPrompt(interactive=True)
+        monkeypatch.setattr("builtins.input", lambda _: "T")
+
+        skipped = copy_rules_and_skills(tmp_path, True, "en", manifest, False, prompt)
+
+        rule = tmp_path / ".claude" / "rules" / "implementation-standard.md"
+        assert "IMPLEMENTATION STANDARD" in rule.read_text(encoding="utf-8")
+        assert "rules/implementation-standard.md" not in skipped
+        mine = tmp_path / ".claude" / ".upgrades" / "rules" / "implementation-standard.md.mine"
+        assert mine.read_text(encoding="utf-8") == "my own standard\n"
+
+    def test_taking_ours_records_the_new_hash(self, tmp_path, monkeypatch):
+        """Otherwise the same file is reported as modified on the next upgrade."""
+        manifest = _modified_rule(tmp_path)
+        prompt = bootstrap.ConflictPrompt(interactive=True)
+        monkeypatch.setattr("builtins.input", lambda _: "T")
+
+        copy_rules_and_skills(tmp_path, True, "en", manifest, False, prompt)
+
+        rule = tmp_path / ".claude" / "rules" / "implementation-standard.md"
+        assert manifest["files"]["rules/implementation-standard.md"] == file_sha256(rule)
+
+
+class TestPromptWiring:
+    def _run(self, tmp_path, monkeypatch, argv, isatty=True):
+        asked = []
+        monkeypatch.setattr(bootstrap, "_stdin_is_a_person", lambda: isatty)
+
+        def record_prompt(project_dir, with_rules, lang, manifest, force,
+                          prompt=None, *args, **kwargs):
+            asked.append(prompt.will_ask)
+            return []
+
+        _stub_heavy_steps(monkeypatch)
+        monkeypatch.setattr(bootstrap, "copy_rules_and_skills", record_prompt)
+        monkeypatch.setattr(sys, "argv",
+                            ["bootstrap.py", "--project-dir", str(tmp_path)] + argv)
+        with pytest.raises(SystemExit):
+            bootstrap.main()
+        return asked[0]
+
+    def test_asks_on_a_terminal(self, tmp_path, monkeypatch):
+        assert self._run(tmp_path, monkeypatch, []) is True
+
+    def test_silent_without_a_terminal(self, tmp_path, monkeypatch):
+        """Batch upgrades, CI and agent-driven runs must not block on input."""
+        assert self._run(tmp_path, monkeypatch, [], isatty=False) is False
+
+    def test_force_does_not_ask(self, tmp_path, monkeypatch):
+        assert self._run(tmp_path, monkeypatch, ["--force"]) is False
+
+    def test_keep_mine_does_not_ask(self, tmp_path, monkeypatch):
+        assert self._run(tmp_path, monkeypatch, ["--keep-mine"]) is False
+
+    def test_dry_run_does_not_ask(self, tmp_path, monkeypatch):
+        assert self._run(tmp_path, monkeypatch, ["--dry-run"]) is False
+
+
+# ============================================================================
+# --dry-run
+# ============================================================================
+# The flag says "print the plan without writing anything", and the README tells
+# people to run it first. Only the cleanup pass honoured it: the copy steps
+# wrote files regardless, so the preview changed the project it previewed.
+
+
+class TestDryRunWritesNothing:
+    def _snapshot(self, root):
+        return {
+            str(f.relative_to(root)): f.read_bytes()
+            for f in root.rglob("*") if f.is_file()
+        }
+
+    def test_fresh_project_stays_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bootstrap, "install_beads", lambda pd: True)
+        monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda pd: None)
+
+        rc = bootstrap.bootstrap_project(
+            project_dir=tmp_path, project_name="Demo", with_rules=True,
+            lang="en", force=False, upgrade=False, dry_run=True,
+        )
+
+        assert rc == 0
+        assert list(tmp_path.rglob("*")) == [], "dry run created files"
+
+    def test_existing_install_is_left_byte_for_byte(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bootstrap, "install_beads", lambda pd: True)
+        monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda pd: None)
+        # A real install first...
+        bootstrap.bootstrap_project(
+            project_dir=tmp_path, project_name="Demo", with_rules=True,
+            lang="en", force=False, upgrade=False, dry_run=False,
+        )
+        before = self._snapshot(tmp_path)
+        assert before, "nothing was installed, the test proves nothing"
+
+        # ...then a preview of the next upgrade
+        bootstrap.bootstrap_project(
+            project_dir=tmp_path, project_name="Demo", with_rules=True,
+            lang="en", force=False, upgrade=True, dry_run=True,
+        )
+
+        assert self._snapshot(tmp_path) == before
+
+    def test_preview_still_reports_what_would_happen(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(bootstrap, "install_beads", lambda pd: True)
+        monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda pd: None)
+
+        bootstrap.bootstrap_project(
+            project_dir=tmp_path, project_name="Demo", with_rules=True,
+            lang="en", force=False, upgrade=False, dry_run=True,
+        )
+
+        out = capsys.readouterr().out
+        assert "[DRY-RUN] settings.json" in out
+        assert "[DRY-RUN] rules/beads-workflow.md" in out
+        assert "[DRY-RUN] CLAUDE.md" in out

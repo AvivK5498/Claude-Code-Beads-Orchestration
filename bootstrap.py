@@ -21,6 +21,7 @@ import os
 import re
 import sys
 import json
+import difflib
 import hashlib
 import shutil
 import subprocess
@@ -414,6 +415,111 @@ def save_upgrade(project_dir: Path, relative_path: str, content: str) -> None:
     dest = project_dir / ".claude" / ".upgrades" / relative_path
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(content, encoding="utf-8")
+
+
+class ConflictPrompt:
+    """Decides what happens to a file the user has edited and we ship anew.
+
+    Leaving the file alone and dropping the new version in .upgrades/ turns an
+    upgrade into homework: the user has to notice, diff and merge by hand. So
+    ask — but only when a person is actually there to answer.
+
+    Nobody is there during a batch upgrade over many projects, in CI, or when
+    an agent drives the CLI. In those runs the answer stays what it has always
+    been: keep the user's file, save ours next to it.
+    """
+
+    KEEP, TAKE = "keep", "take"
+    _DIFF_LINES = 60
+
+    def __init__(self, interactive: bool = False, sticky: str | None = None):
+        self._interactive = interactive
+        self._sticky = sticky if sticky in (self.KEEP, self.TAKE) else None
+        if not interactive and self._sticky is None:
+            self._sticky = self.KEEP
+
+    @property
+    def will_ask(self) -> bool:
+        return self._interactive and self._sticky is None
+
+    def ask(self, rel_key: str, current: Path, new_text: str) -> str:
+        """Return KEEP or TAKE for one file."""
+        if self._sticky:
+            return self._sticky
+        print(f"\n  {rel_key} — you edited this file, and this version ships a new one.")
+        print(f"    k  keep yours (ours goes to .claude/.upgrades/{rel_key})")
+        print(f"    t  take ours  (yours goes to .claude/.upgrades/{rel_key}.mine)")
+        print("    d  show what changed")
+        print("    K  keep yours for every remaining file")
+        print("    T  take ours for every remaining file")
+        while True:
+            try:
+                answer = input("  [k]: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n  (no answer — keeping yours)")
+                return self.KEEP
+            if answer == "d":
+                self._show_diff(rel_key, current, new_text)
+                continue
+            if answer in ("K", "T"):
+                self._sticky = self.KEEP if answer == "K" else self.TAKE
+                return self._sticky
+            if answer == "t":
+                return self.TAKE
+            if answer in ("", "k"):
+                return self.KEEP
+            print(f"  '{answer}' is not one of k, t, d, K, T")
+
+    def _show_diff(self, rel_key: str, current: Path, new_text: str) -> None:
+        try:
+            old_text = current.read_text(encoding="utf-8")
+        except Exception as e:
+            print(f"  cannot read {rel_key}: {e}")
+            return
+        diff = list(difflib.unified_diff(
+            old_text.splitlines(), new_text.splitlines(),
+            fromfile="yours", tofile="ours", lineterm="",
+        ))
+        if not diff:
+            print("  no textual difference (only the recorded hash differs)")
+            return
+        for line in diff[:self._DIFF_LINES]:
+            print(f"  {line}")
+        if len(diff) > self._DIFF_LINES:
+            print(f"  ... {len(diff) - self._DIFF_LINES} more lines")
+
+
+def _dry(dry_run: bool) -> str:
+    """Prefix for a line describing a write that a dry run did not make."""
+    return "[DRY-RUN] " if dry_run else ""
+
+
+def _stdin_is_a_person() -> bool:
+    """True when a human can answer a prompt."""
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except Exception:
+        return False
+
+
+def _resolve_modified(prompt, project_dir: Path, rel_key: str, dest: Path,
+                      new_text: str) -> bool:
+    """Ask (or apply the standing answer). True → write ours over theirs.
+
+    Whichever way it goes, the version that loses is preserved under
+    .claude/.upgrades/ — an upgrade never destroys text a person wrote.
+    """
+    if prompt is None:
+        prompt = ConflictPrompt(interactive=False)
+    if prompt.ask(rel_key, dest, new_text) == ConflictPrompt.TAKE:
+        try:
+            save_upgrade(project_dir, rel_key + ".mine",
+                         dest.read_text(encoding="utf-8"))
+        except Exception:
+            pass  # unreadable file: taking ours is still the user's choice
+        return True
+    save_upgrade(project_dir, rel_key, new_text)
+    return False
 
 
 # ============================================================================
@@ -855,12 +961,13 @@ def configure_beads_export(project_dir: Path) -> bool:
 
 def copy_agents(
     project_dir: Path, project_name: str,
-    manifest: dict, force: bool = False,
+    manifest: dict, force: bool = False, prompt=None, dry_run: bool = False,
 ) -> list:
     """Copy code-reviewer and merge-supervisor templates."""
     print("\n[2/6] Copying agents...")
     agents_dir = project_dir / ".claude" / "agents"
-    agents_dir.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        agents_dir.mkdir(parents=True, exist_ok=True)
     skipped = []
 
     replacements = {"[Project]": project_name}
@@ -868,46 +975,51 @@ def copy_agents(
         dest = agents_dir / agent_file.name
         rel_key = f"agents/{agent_file.name}"
         ok, reason = should_update_file(dest, rel_key, manifest, force)
+        new_content = agent_file.read_text(encoding="utf-8")
+        for placeholder, value in replacements.items():
+            new_content = new_content.replace(placeholder, value)
+        if not ok:
+            ok = _resolve_modified(prompt, project_dir, rel_key, dest, new_content)
+            reason = "replaced on request" if ok else reason
         if ok:
-            copy_and_replace(agent_file, dest, replacements)
-            manifest["files"][rel_key] = file_sha256(dest)
-            print(f"  - {agent_file.name}" + (f" ({reason})" if reason != "new" else ""))
+            if not dry_run:
+                copy_and_replace(agent_file, dest, replacements)
+                manifest["files"][rel_key] = file_sha256(dest)
+            print(f"  - {_dry(dry_run)}{agent_file.name}"
+                  + (f" ({reason})" if reason != "new" else ""))
         else:
-            # Save new version to .upgrades/
-            new_content = agent_file.read_text(encoding="utf-8")
-            for placeholder, value in replacements.items():
-                new_content = new_content.replace(placeholder, value)
-            save_upgrade(project_dir, rel_key, new_content)
             skipped.append(rel_key)
-            print(f"  - {agent_file.name} (MODIFIED by user — skipped)")
-            print(f"    New version saved to: .claude/.upgrades/{rel_key}")
+            print(f"  - {agent_file.name} (yours kept)")
     print("  DONE")
     return skipped
 
 
-def copy_hooks(project_dir: Path, manifest: dict) -> None:
+def copy_hooks(project_dir: Path, manifest: dict, dry_run: bool = False) -> None:
     """Copy Node.js hooks (always overwrite — enforcement code)."""
     print("\n[3/6] Copying hooks...")
     hooks_dir = project_dir / ".claude" / "hooks"
-    hooks_dir.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        hooks_dir.mkdir(parents=True, exist_ok=True)
 
     for hook_file in (TEMPLATES_DIR / "hooks").glob("*.cjs"):
         dest = hooks_dir / hook_file.name
-        shutil.copy2(hook_file, dest)
-        rel_key = f"hooks/{hook_file.name}"
-        manifest["files"][rel_key] = file_sha256(dest)
-        print(f"  - {hook_file.name}")
+        if not dry_run:
+            shutil.copy2(hook_file, dest)
+            manifest["files"][f"hooks/{hook_file.name}"] = file_sha256(dest)
+        print(f"  - {_dry(dry_run)}{hook_file.name}")
     print("  DONE")
 
 
 def copy_rules_and_skills(
     project_dir: Path, with_rules: bool, lang: str = "en",
-    manifest: dict = None, force: bool = False,
+    manifest: dict = None, force: bool = False, prompt=None,
+    dry_run: bool = False,
 ) -> list:
     """Copy beads-workflow rule, project-discovery skill, and optional dev rules."""
     print("\n[4/6] Copying rules and skills...")
     rules_dir = project_dir / ".claude" / "rules"
-    rules_dir.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        rules_dir.mkdir(parents=True, exist_ok=True)
     skipped = []
 
     # Determine source directory based on language
@@ -924,15 +1036,20 @@ def copy_rules_and_skills(
         dest = rules_dir / "beads-workflow.md"
         rel_key = "rules/beads-workflow.md"
         ok, reason = should_update_file(dest, rel_key, manifest, force)
+        if not ok:
+            ok = _resolve_modified(prompt, project_dir, rel_key, dest,
+                                   beads_src.read_text(encoding="utf-8"))
+            reason = "replaced on request" if ok else reason
         if ok:
-            shutil.copy2(beads_src, dest)
-            manifest["files"][rel_key] = file_sha256(dest)
-            print(f"  - rules/beads-workflow.md" + (f" ({reason})" if reason != "new" else ""))
+            if not dry_run:
+                shutil.copy2(beads_src, dest)
+                manifest["files"][rel_key] = file_sha256(dest)
+            print(f"  - {_dry(dry_run)}rules/beads-workflow.md"
+                  + (f" ({reason})" if reason != "new" else ""))
         else:
-            save_upgrade(project_dir, rel_key, beads_src.read_text(encoding="utf-8"))
             skipped.append(rel_key)
-            print(f"  - rules/beads-workflow.md (MODIFIED by user — skipped)")
-            print(f"    New version saved to: .claude/.upgrades/{rel_key}")
+            print(f"  - rules/beads-workflow.md (yours kept)")
+            print(f"    Ours saved to: .claude/.upgrades/{rel_key}")
 
     # Optional dev rules (from language-specific directory)
     if with_rules:
@@ -941,38 +1058,44 @@ def copy_rules_and_skills(
                 dest = rules_dir / rule_file.name
                 rel_key = f"rules/{rule_file.name}"
                 ok, reason = should_update_file(dest, rel_key, manifest, force)
+                if not ok:
+                    ok = _resolve_modified(prompt, project_dir, rel_key, dest,
+                                           rule_file.read_text(encoding="utf-8"))
+                    reason = "replaced on request" if ok else reason
                 if ok:
-                    shutil.copy2(rule_file, dest)
-                    manifest["files"][rel_key] = file_sha256(dest)
+                    if not dry_run:
+                        shutil.copy2(rule_file, dest)
+                        manifest["files"][rel_key] = file_sha256(dest)
                     suffix = f" ({lang})" if lang != "en" else ""
                     suffix += f" ({reason})" if reason != "new" else ""
-                    print(f"  - rules/{rule_file.name}{suffix}")
+                    print(f"  - {_dry(dry_run)}rules/{rule_file.name}{suffix}")
                 else:
-                    save_upgrade(project_dir, rel_key, rule_file.read_text(encoding="utf-8"))
                     skipped.append(rel_key)
-                    print(f"  - rules/{rule_file.name} (MODIFIED by user — skipped)")
-                    print(f"    New version saved to: .claude/.upgrades/{rel_key}")
+                    print(f"  - rules/{rule_file.name} (yours kept)")
+                    print(f"    Ours saved to: .claude/.upgrades/{rel_key}")
 
     # Project discovery skill (always overwrite — our code)
     skills_dir = project_dir / ".claude" / "skills"
     skill_src = TEMPLATES_DIR / "skills" / "project-discovery"
     if skill_src.exists():
         dest = skills_dir / "project-discovery"
-        if dest.exists():
-            shutil.rmtree(dest)
-        shutil.copytree(skill_src, dest)
-        # Record skill files in manifest
-        for skill_file in dest.rglob("*"):
-            if skill_file.is_file():
-                rel_key = str(skill_file.relative_to(project_dir / ".claude")).replace("\\", "/")
-                manifest["files"][rel_key] = file_sha256(skill_file)
-        print("  - skills/project-discovery/")
+        if not dry_run:
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(skill_src, dest)
+            # Record skill files in manifest
+            for skill_file in dest.rglob("*"):
+                if skill_file.is_file():
+                    rel_key = str(skill_file.relative_to(project_dir / ".claude")).replace("\\", "/")
+                    manifest["files"][rel_key] = file_sha256(skill_file)
+        print(f"  - {_dry(dry_run)}skills/project-discovery/")
 
     print("  DONE")
     return skipped
 
 
-def copy_settings_and_claude_md(project_dir: Path, project_name: str) -> None:
+def copy_settings_and_claude_md(project_dir: Path, project_name: str,
+                                dry_run: bool = False) -> None:
     """Copy settings.json (merge hooks) and CLAUDE.md (append if exists)."""
     print("\n[5/6] Copying settings and CLAUDE.md...")
 
@@ -986,23 +1109,26 @@ def copy_settings_and_claude_md(project_dir: Path, project_name: str) -> None:
                 before = settings_dest.read_text(encoding='utf-8')
                 existing = json.loads(before)
                 migrated = merge_hooks(existing, new_settings.get("hooks", {}))
-                # The only write we make into a file the user owns. Keep the
-                # previous version reachable before touching it.
-                save_upgrade(project_dir, "settings.json.before-merge", before)
-                settings_dest.write_text(json.dumps(existing, indent=2) + "\n", encoding='utf-8')
-                print("  - settings.json (merged hooks)")
+                if not dry_run:
+                    # The only write we make into a file the user owns. Keep the
+                    # previous version reachable before touching it.
+                    save_upgrade(project_dir, "settings.json.before-merge", before)
+                    settings_dest.write_text(json.dumps(existing, indent=2) + "\n", encoding='utf-8')
+                print(f"  - {_dry(dry_run)}settings.json (merged hooks)")
                 for old_cmd, _ in migrated:
                     print(f"    rewrote hook path: {old_cmd[:70]}")
             except Exception:
-                shutil.copy2(settings_src, settings_dest)
-                print("  - settings.json (replaced — could not merge)")
+                if not dry_run:
+                    shutil.copy2(settings_src, settings_dest)
+                print(f"  - {_dry(dry_run)}settings.json (replaced — could not merge)")
         else:
-            settings_dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(settings_src, settings_dest)
-            print("  - settings.json")
+            if not dry_run:
+                settings_dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(settings_src, settings_dest)
+            print(f"  - {_dry(dry_run)}settings.json")
 
     # --- settings.local.json: same stale-path rewrite, never templated ---
-    for old_cmd, _ in migrate_local_settings_hooks(project_dir):
+    for old_cmd, _ in (migrate_local_settings_hooks(project_dir) if not dry_run else []):
         print(f"  - settings.local.json: rewrote hook path: {old_cmd[:70]}")
 
     # --- CLAUDE.md: append beads section if file exists ---
@@ -1015,22 +1141,25 @@ def copy_settings_and_claude_md(project_dir: Path, project_name: str) -> None:
             if "## Workflow" in existing_content and "beads" in existing_content.lower():
                 # Never rewrite a CLAUDE.md a human has been editing — hand the
                 # current template over instead, the way rules are handed over.
-                save_upgrade(project_dir, "CLAUDE.md", beads_content)
+                if not dry_run:
+                    save_upgrade(project_dir, "CLAUDE.md", beads_content)
                 print("  - CLAUDE.md (already has beads section, kept)")
-                print("    Current template saved to: .claude/.upgrades/CLAUDE.md")
+                print(f"    {_dry(dry_run)}Current template saved to: .claude/.upgrades/CLAUDE.md")
             else:
                 separator = "\n\n---\n\n# Beads Orchestration\n\n"
-                with open(claude_dest, "a", encoding="utf-8") as f:
-                    f.write(separator + beads_content)
-                print("  - CLAUDE.md (appended beads section)")
+                if not dry_run:
+                    with open(claude_dest, "a", encoding="utf-8") as f:
+                        f.write(separator + beads_content)
+                print(f"  - {_dry(dry_run)}CLAUDE.md (appended beads section)")
         else:
-            claude_dest.write_text(beads_content, encoding='utf-8')
-            print("  - CLAUDE.md (created)")
+            if not dry_run:
+                claude_dest.write_text(beads_content, encoding='utf-8')
+            print(f"  - {_dry(dry_run)}CLAUDE.md (created)")
 
     print("  DONE")
 
 
-def setup_gitignore(project_dir: Path) -> None:
+def setup_gitignore(project_dir: Path, dry_run: bool = False) -> None:
     """Ensure .worktrees/, .claude/.upgrades/, and /issues.jsonl are in .gitignore.
 
     NOTE: the beads tracker travels with the repo, so .beads/ is intentionally
@@ -1050,21 +1179,26 @@ def setup_gitignore(project_dir: Path) -> None:
             if e not in lines and e.rstrip("/") not in lines
         ]
         if missing:
-            with open(gitignore_path, "a", encoding="utf-8") as f:
-                if content and not content.endswith("\n"):
-                    f.write("\n")
-                f.write("\n# Beads orchestration\n")
+            if dry_run:
                 for entry in missing:
-                    f.write(f"{entry}\n")
-                    print(f"  - Added {entry}")
+                    print(f"  - {_dry(dry_run)}Would add {entry}")
+            else:
+                with open(gitignore_path, "a", encoding="utf-8") as f:
+                    if content and not content.endswith("\n"):
+                        f.write("\n")
+                    f.write("\n# Beads orchestration\n")
+                    for entry in missing:
+                        f.write(f"{entry}\n")
+                        print(f"  - Added {entry}")
         else:
             print("  - Already configured")
     else:
-        gitignore_path.write_text(
-            "# Beads orchestration\n.worktrees/\n.claude/.upgrades/\n/issues.jsonl\n",
-            encoding='utf-8',
-        )
-        print("  - Created .gitignore")
+        if not dry_run:
+            gitignore_path.write_text(
+                "# Beads orchestration\n.worktrees/\n.claude/.upgrades/\n/issues.jsonl\n",
+                encoding='utf-8',
+            )
+        print(f"  - {_dry(dry_run)}Created .gitignore")
 
     print("  DONE")
 
@@ -1107,6 +1241,7 @@ def _print_cleanup_report(report: dict, dry_run: bool) -> None:
 def bootstrap_project(
     project_dir: Path, project_name: str | None, with_rules: bool,
     lang: str, force: bool, upgrade: bool, dry_run: bool,
+    keep_mine: bool = False,
 ) -> int:
     """Run bootstrap for a single project. Returns exit code (0 = success)."""
     project_dir.mkdir(parents=True, exist_ok=True)
@@ -1139,16 +1274,27 @@ def bootstrap_project(
     manifest = load_manifest(project_dir)
     all_skipped = []
 
+    # Files the user edited are a question, not a silent skip. --force answers
+    # "take ours" for all of them, --keep-mine answers "keep mine", a dry run
+    # asks nothing, and a run with no person attached keeps the user's files.
+    prompt = ConflictPrompt(
+        interactive=not (force or keep_mine or dry_run) and _stdin_is_a_person(),
+        sticky=ConflictPrompt.KEEP if keep_mine or dry_run else None,
+    )
+    if prompt.will_ask:
+        print("\nFiles you edited will be shown one by one — you decide each.")
+
     if not install_beads(project_dir):
         return 1
 
-    all_skipped += copy_agents(project_dir, resolved_name, manifest, force)
-    copy_hooks(project_dir, manifest)
+    all_skipped += copy_agents(project_dir, resolved_name, manifest, force,
+                               prompt, dry_run)
+    copy_hooks(project_dir, manifest, dry_run)
     all_skipped += copy_rules_and_skills(
-        project_dir, with_rules, lang, manifest, force,
+        project_dir, with_rules, lang, manifest, force, prompt, dry_run,
     )
-    copy_settings_and_claude_md(project_dir, resolved_name)
-    setup_gitignore(project_dir)
+    copy_settings_and_claude_md(project_dir, resolved_name, dry_run)
+    setup_gitignore(project_dir, dry_run)
 
     # Read version from package.json (same package as bootstrap.py)
     pkg_json = SCRIPT_DIR / "package.json"
@@ -1177,10 +1323,11 @@ def bootstrap_project(
     print("=" * 60)
 
     if all_skipped:
-        print(f"\n  {len(all_skipped)} file(s) skipped (user-modified):")
+        print(f"\n  {len(all_skipped)} file(s) kept as yours:")
         for rel in all_skipped:
             print(f"    - {rel}")
-            print(f"      Review: diff .claude/{rel} .claude/.upgrades/{rel}")
+            print(f"      Ours is next to it: .claude/.upgrades/{rel}")
+        print("    Re-run with --force to take ours for all of them.")
 
     # Post-upgrade health check — never fatal
     if upgrade and not dry_run:
@@ -1200,6 +1347,7 @@ Next steps:
 
 def run_batch_upgrade(
     parent_dir: Path, with_rules: bool, lang: str, force: bool, dry_run: bool,
+    keep_mine: bool = False,
 ) -> int:
     """Iterate direct subdirs of parent_dir that contain .beads/ and upgrade each."""
     if not parent_dir.exists() or not parent_dir.is_dir():
@@ -1220,6 +1368,7 @@ def run_batch_upgrade(
             rc = bootstrap_project(
                 project_dir=child, project_name=None, with_rules=with_rules,
                 lang=lang, force=force, upgrade=True, dry_run=dry_run,
+                keep_mine=keep_mine,
             )
             if rc == 0:
                 upgraded += 1
@@ -1244,7 +1393,8 @@ def main():
     parser.add_argument("--project-dir", default=".", help="Project directory")
     parser.add_argument("--with-rules", action="store_true", help="Also copy dev rules (implementation-standard, logging, tdd)")
     parser.add_argument("--lang", default=None, choices=["en", "ru"], help="Language for dev rules (default: the language this project was installed with, else en)")
-    parser.add_argument("--force", action="store_true", help="Overwrite all files regardless of user modifications")
+    parser.add_argument("--force", action="store_true", help="Take our version of every file, no questions asked")
+    parser.add_argument("--keep-mine", dest="keep_mine", action="store_true", help="Keep your version of every file you edited, no questions asked")
     parser.add_argument("--upgrade", action="store_true", help="Run init flow then cleanup obsolete items (uses existing manifest)")
     parser.add_argument("--dry-run", action="store_true", help="Print plan without writing anything")
     parser.add_argument("--all", dest="all_parent", default=None, metavar="PARENT_DIR", help="Batch upgrade: iterate direct subdirs of PARENT_DIR that contain .beads/. Implies --upgrade.")
@@ -1254,14 +1404,14 @@ def main():
         parent = Path(args.all_parent).resolve()
         sys.exit(run_batch_upgrade(
             parent_dir=parent, with_rules=args.with_rules, lang=args.lang,
-            force=args.force, dry_run=args.dry_run,
+            force=args.force, dry_run=args.dry_run, keep_mine=args.keep_mine,
         ))
 
     project_dir = Path(args.project_dir).resolve()
     sys.exit(bootstrap_project(
         project_dir=project_dir, project_name=args.project_name,
         with_rules=args.with_rules, lang=args.lang, force=args.force,
-        upgrade=args.upgrade, dry_run=args.dry_run,
+        upgrade=args.upgrade, dry_run=args.dry_run, keep_mine=args.keep_mine,
     ))
 
 

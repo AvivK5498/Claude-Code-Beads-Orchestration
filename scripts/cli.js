@@ -26,8 +26,9 @@ Options:
   --no-rules       Skip dev rules (implementation, logging, TDD)
   --lang <en|ru>   Language for dev rules (default: whatever this project was
                    installed with, else en)
-  --force          Overwrite all files regardless of user modifications
-  --dry-run        Preview changes without writing (upgrade only)
+  --force          Take our version of every file, no questions asked
+  --keep-mine      Keep your version of every file you edited, no questions
+  --dry-run        Print what would change and write nothing
   --all <parent>   Batch upgrade: iterate subdirs of <parent> with .beads/ (upgrade only)
 
 Examples:
