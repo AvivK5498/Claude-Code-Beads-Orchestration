@@ -31,7 +31,7 @@
 **Ключевой принцип:** Блокировка плохих действий через hooks эффективнее чем просьба "пожалуйста, не делай так".
 
 **Примеры:**
-- "Не коммить на main" (инструкция) → hook `enforce-branch-before-edit.cjs` физически блокирует Edit/Write на main (constraint)
+- "Использовать bd worktree create" (инструкция) → hook `bash-guard.cjs` блокирует сырой `git worktree add` (constraint)
 - "Используй description при создании bead" (инструкция) → hook `bash-guard.cjs` блокирует `bd create` без `-d` (constraint)
 - "Не пропускай pre-commit hooks" (инструкция) → hook блокирует `git --no-verify` (constraint)
 

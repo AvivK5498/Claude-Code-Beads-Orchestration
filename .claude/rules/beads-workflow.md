@@ -4,49 +4,45 @@
 
 Context gets compacted. Sessions restart. Beads persist.
 
-### When to create a bead — ALWAYS if:
-- User asks to implement, fix, refactor, or change anything
-- You discover a bug, tech debt, or improvement during work
-- A task needs follow-up that won't happen right now
-- You start investigating something non-trivial
+This rule is the workflow, not a bd tutorial — `bd prime` prints the command
+reference at session start, and `bd <cmd> --help` covers the rest.
 
-### After planning — size check then create beads:
-When a plan is finalized and user confirms, BEFORE implementation:
+### When to create a bead
 
-**Step 1: Size check (one sentence decision):**
-- >3 files OR >1 domain (DB + API, backend + frontend) → epic with children
-- Description has "and then", "after that", multiple steps → multiple beads
-- >50 lines estimated → consider splitting
-- Otherwise → single bead
+Anything the user asks you to build, fix, or change, and anything non-trivial
+you decide to investigate. Also whatever you stumble on along the way — a bug,
+tech debt, a follow-up that will not happen now:
 
-Rule of thumb: 1 bead = 1 PR = 1 reviewable diff.
-
-**Step 2: Create beads:**
-- Single task: `bd create "Task" -d "..."`
-- Epic: `bd create "Feature" -d "..." --type epic`, then children with `--parent` and `--deps`
-- Full list of `--type` values (task, bug, feature, epic, spike, story, milestone, ...): `bd create --help`
-- Verify: `bd list` — the plan now lives in beads, not just in context
-
-**Step 3: Only then start work** with `bd ready` → dispatch
-
-### When NOT to create a bead:
-- Quick fix approved by user (<10 lines, feature branch)
-- Pure research/discussion with no code changes planned
-
-### Status discipline:
-- Created → `open` (default)
-- Starting work → `bd update {ID} --status in_progress`
-- Submitted for review → `bd comments add {ID} "AWAITING REVIEW"` then leave bead at `in_progress` until user merges
-- Merged/done → `bd close {ID}`
-- **Epic status:** When starting work on the first child → `bd update {EPIC_ID} --status in_progress`. Epic stays `in_progress` until all children are done.
-- **Never leave a bead in `in_progress` across sessions without reason**
-
-### Discovered during work:
-When you find tech debt, bugs, or improvements while working on something else:
 ```bash
 bd create "Fix: [what]" -d "Discovered while working on {CURRENT_BEAD}: [details]"
 ```
-Don't try to fix it now (unless trivial). Create the bead so it's not forgotten.
+
+Do not fix it inline unless it is trivial; the bead is what keeps it from being
+forgotten.
+
+**Not a bead:** a quick fix the user approved (<10 lines, feature branch), and
+research or discussion with no code changes planned.
+
+### After planning — size check, then create beads
+
+Plan finalized and confirmed, BEFORE implementation:
+
+- >3 files OR >1 domain (DB + API, backend + frontend) → epic with children
+  (`--type epic`, then children with `--parent` and `--deps`)
+- "and then", "after that", multiple steps in the description → several beads
+- >50 lines estimated → consider splitting
+- Otherwise → one bead
+
+Rule of thumb: 1 bead = 1 PR = 1 reviewable diff. Then `bd list` to confirm the
+plan now lives in beads and not just in context, and `bd ready` → dispatch.
+
+### Status discipline
+
+`open` → `in_progress` when work starts → comment `AWAITING REVIEW` when it is
+submitted, **still `in_progress`** → the user closes it after merging the PR.
+
+An epic goes `in_progress` with its first child and stays there until every
+child is done. Never leave a bead `in_progress` across sessions without a reason.
 
 ## Task Start
 
@@ -56,14 +52,12 @@ Don't try to fix it now (unless trivial). Create the bead so it's not forgotten.
    bd worktree create .worktrees/bd-{BEAD_ID} --branch bd-{BEAD_ID}
    cd .worktrees/bd-{BEAD_ID}
    ```
-   In bd 1.0.2+ the worktree auto-detects the shared database via the common git directory (`git-common-dir`) — no `.beads/redirect` file is needed (it is obsolete). All bd commands from inside the worktree operate on the single shared database from the main repo.
-
-   **Status labels `none` / `local (no redirect)` are normal.** `bd worktree list` shows `none` and `bd worktree info` shows `local (no redirect)` — these are cosmetic. The database is still shared (`bd list` from inside a fresh worktree sees the shared tasks). Do NOT treat `none`/`local` as a sign of breakage.
-
-   **Protection against a stray `.beads/issues.jsonl` in the worktree** is `export.git-add false` plus `/issues.jsonl` in `.gitignore` (set up by bootstrap) — NOT a check of the worktree's shared status.
-3. Mark in progress: `bd update {BEAD_ID} --status in_progress`
-4. If this is a child of an epic — check epic status. If epic is still `open`, mark it too: `bd update {EPIC_ID} --status in_progress`
-5. Read bead context: `bd show {BEAD_ID}` and `bd comments {BEAD_ID}`
+   It shares the main repo's database — labels like `none` or
+   `local (no redirect)` are cosmetic, not breakage. Anything odd around
+   worktrees and bd: `bd memories worktree` before investigating.
+3. `bd update {BEAD_ID} --status in_progress` — and the parent epic too, if it
+   is still `open`
+4. Read the context you were given: `bd show {BEAD_ID}` and `bd comments {BEAD_ID}`
 
 ## During Implementation
 
@@ -73,17 +67,15 @@ Don't try to fix it now (unless trivial). Create the bead so it's not forgotten.
 
 ## Task Completion
 
-Execute ALL steps in order:
+All of it, in order:
 
-1. **Self-verify against requirements:**
-   - Run `bd show {BEAD_ID}` — re-read the description
-   - Check every item/requirement from the description
-   - If anything is missing — implement it now, don't skip
-2. `git add -A && git commit -m "..."`
-3. `git push origin bd-{BEAD_ID}`
-4. Leave completion comment: `bd comments add {BEAD_ID} "Completed: [summary]"`
-5. Signal review: `bd comments add {BEAD_ID} "AWAITING REVIEW"` — leave the bead at `in_progress`; the user closes it after merging the PR.
-6. Return completion report (checklist is MANDATORY — hook will block without it):
+1. **Self-verify:** re-read the description with `bd show {BEAD_ID}` and check
+   every requirement in it. Something missing — implement it now, do not skip.
+2. `git add -A && git commit -m "..."` then `git push origin bd-{BEAD_ID}`
+3. `bd comments add {BEAD_ID} "Completed: [summary]"`, then a second comment
+   `AWAITING REVIEW`. Leave the bead `in_progress` — the user closes it.
+4. Return the completion report (the checklist is MANDATORY — the hook blocks
+   a report without it):
    ```
    BEAD {BEAD_ID} COMPLETE
    Worktree: .worktrees/bd-{BEAD_ID}
@@ -95,13 +87,13 @@ Execute ALL steps in order:
    Summary: [1 sentence]
    ```
 
-CLI: `bd prime` for overview, `bd <cmd> --help` for details
-
 ## Banned
 
 - Working directly on main branch
 - Implementing without BEAD_ID
 - Merging your own branch (user merges via PR)
 - Editing files outside your worktree
-- Raw `git worktree add` — MUST use `bd worktree create`. Raw `git worktree add` creates a shadow `.beads/` copy, spawns orphan dolt-server processes, blocks file deletion, and loses bead data.
-- For REMOVING a worktree, raw `git worktree remove --force` followed by `git worktree prune` IS allowed — `bd worktree remove` is broken on Windows (bug u51). (`bd worktree create` for creation still stands, because creation is what wires up the shared database.)
+- Raw `git worktree add` — it creates a shadow `.beads/` copy, leaks dolt
+  processes and loses bead data. Use `bd worktree create`. Removing one with
+  raw `git worktree remove --force` + `git worktree prune` IS allowed, because
+  `bd worktree remove` is broken on Windows (bug u51).

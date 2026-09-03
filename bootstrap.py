@@ -18,6 +18,7 @@ Usage:
 """
 
 import os
+import re
 import sys
 import json
 import hashlib
@@ -50,6 +51,13 @@ OBSOLETE_FILES: list[str] = [
     ".claude/hooks/memory-capture.cjs",
     ".claude/hooks/recall.cjs",
     ".beads/memory/recall.cjs",
+    # v3.6.0 hook revision:
+    # - enforce-branch-before-edit: branch protection now lives in the rules,
+    #   not in a tool-level block on every Edit/Write.
+    # - nudge-claude-md-update: asked the model to copy state into CLAUDE.md,
+    #   which works against "beads is the single source of truth".
+    ".claude/hooks/enforce-branch-before-edit.cjs",
+    ".claude/hooks/nudge-claude-md-update.cjs",
 ]
 
 # Directory paths relative to project_dir. Removed if they exist (no manifest
@@ -65,6 +73,14 @@ OBSOLETE_DIRS: list[str] = [
 # is stripped. Original settings.json is backed up before writing.
 OBSOLETE_SETTINGS_HOOKS: list[str] = [
     "memory-capture.cjs",
+    # Shell hooks from the pre-v3 fork. v3 ships no .sh hooks, so these
+    # entries point at files that do not exist — every matching tool call
+    # paid for a failed spawn and the event ran with one hook missing.
+    "block-branch-for-epic-child.sh",
+    "clarify-vague-request.sh",
+    # v3.6.0 hook revision — see OBSOLETE_FILES above.
+    "enforce-branch-before-edit",
+    "nudge-claude-md-update",
 ]
 
 # Substrings matched against hook command strings in
@@ -74,6 +90,186 @@ OBSOLETE_SETTINGS_HOOKS: list[str] = [
 OBSOLETE_LOCAL_SETTINGS_PATTERNS: list[str] = [
     "bd prime",
 ]
+
+
+# ============================================================================
+# HOOK COMMAND PATHS
+# ============================================================================
+# A hook process does NOT run in the project root — it inherits the working
+# directory of the last Bash tool call. A relative command path
+# (`node .claude/hooks/bash-guard.cjs`) therefore resolves against a
+# subdirectory or a worktree, Node exits with "Cannot find module", and Claude
+# Code treats it as non-blocking: the tool call proceeds with that hook
+# silently absent. templates/settings.json holds the fix — a `node -e` wrapper
+# that resolves the project root from CLAUDE_PROJECT_DIR, falling back to
+# `git rev-parse --show-toplevel`, then cwd.
+#
+# The wrapper deliberately avoids `$CLAUDE_PROJECT_DIR` inside the command:
+# variable expansion is the shell's job, and hook commands run under
+# PowerShell when Git Bash is absent, where `$CLAUDE_PROJECT_DIR` is an
+# undefined variable that collapses to an empty string (measured — it fails
+# even from the project root).
+
+_HOOK_FILE_RE = re.compile(r"([A-Za-z0-9._-]+\.cjs)")
+
+
+def _hook_basename(command: str) -> str:
+    """Last *.cjs file name referenced by a hook command ('' if none).
+
+    Works for every form the command has taken across versions: a bare
+    relative path, an absolute path, a `$CLAUDE_PROJECT_DIR/...` path, or the
+    current wrapper where the file name is the trailing argument.
+    """
+    found = _HOOK_FILE_RE.findall(command or "")
+    return found[-1] if found else ""
+
+
+def canonical_hook_commands() -> dict:
+    """hook file name -> canonical command, read from templates/settings.json.
+
+    The template is the single source of truth: bootstrap never hardcodes a
+    command string, so template and installed projects cannot drift.
+    """
+    src = TEMPLATES_DIR / "settings.json"
+    if not src.exists():
+        return {}
+    try:
+        data = json.loads(src.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    mapping: dict = {}
+    for entries in (data.get("hooks") or {}).values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            try:
+                cmd = entry["hooks"][0].get("command", "") or ""
+            except Exception:
+                continue
+            name = _hook_basename(cmd)
+            if name:
+                mapping[name] = cmd
+    return mapping
+
+
+def _is_our_hook_path(command: str) -> bool:
+    """True if the command points into a project's own .claude/hooks/.
+
+    Guards the rewrite against a false positive: a user may keep their own
+    `session-start.cjs` under `scripts/`, and matching on the file name alone
+    would repoint their hook at ours. Every form we have ever written names
+    both path segments — as a path (`.claude/hooks/x.cjs`) or as join()
+    arguments inside the wrapper.
+    """
+    norm = (command or "").replace("\\", "/")
+    return ".claude" in norm and "hooks" in norm
+
+
+def _entry_key(entry) -> tuple:
+    """(matcher, command) identity of a hook entry.
+
+    Matcher is part of the key: one command may legitimately be registered for
+    several matchers under the same event (Edit and Write, say), and
+    deduplicating on the command alone would drop all but the first.
+    """
+    if not isinstance(entry, dict):
+        return "", ""
+    matcher = entry.get("matcher", "") or ""
+    try:
+        cmd = entry["hooks"][0].get("command", "") or ""
+    except Exception:
+        cmd = ""
+    return matcher, cmd
+
+
+def migrate_hook_commands(hooks: dict, canonical: dict) -> list:
+    """Rewrite stale command paths for hooks we own. Mutates `hooks` in place.
+
+    Matches by hook file name, so any older form is recognised. Entries that
+    reference a file we do not own (a user's own hook) are left untouched.
+    Returns [(old_command, new_command)] for reporting.
+    """
+    migrated: list = []
+    if not isinstance(hooks, dict) or not canonical:
+        return migrated
+    for entries in hooks.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                spec = entry["hooks"][0]
+                old = spec.get("command", "") or ""
+            except Exception:
+                continue
+            if not _is_our_hook_path(old):
+                continue
+            new = canonical.get(_hook_basename(old))
+            if new and new != old:
+                spec["command"] = new
+                migrated.append((old, new))
+    return migrated
+
+
+def _dedupe_entries(entries: list) -> list:
+    """Drop repeated (matcher, command) entries, keeping the first."""
+    seen, kept = set(), []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            kept.append(entry)  # malformed — not ours to collapse
+            continue
+        key = _entry_key(entry)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(entry)
+    return kept
+
+
+def merge_hooks(existing: dict, new_hooks: dict) -> list:
+    """Merge template hooks into an existing settings dict. Mutates `existing`.
+
+    1. Rewrite stale paths for hooks we own (all events, not just templated
+       ones — an older install may have put ours under UserPromptSubmit).
+    2. Collapse duplicates that step 1 may have produced.
+    3. Append templated entries that are still missing.
+
+    Returns the migration list from step 1.
+    """
+    hooks = existing.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        hooks = existing["hooks"] = {}
+    migrated = migrate_hook_commands(hooks, canonical_hook_commands())
+
+    for event, template_entries in (new_hooks or {}).items():
+        current = hooks.setdefault(event, [])
+        if not isinstance(current, list):
+            current = hooks[event] = []
+        merged = _dedupe_entries(current)
+        keys = {_entry_key(e) for e in merged}
+        for entry in template_entries:
+            if _entry_key(entry) not in keys:
+                merged.append(entry)
+                keys.add(_entry_key(entry))
+        hooks[event] = merged
+    return migrated
+
+
+def migrate_local_settings_hooks(project_dir: Path) -> list:
+    """Rewrite stale hook paths in .claude/settings.local.json.
+
+    The personal settings file is never templated, but an older install may
+    have our hooks in it — a stale path there fails just as silently.
+    """
+    path = project_dir / ".claude" / "settings.local.json"
+    data, hooks = _load_hooks_section(path)
+    if data is None:
+        return []
+    migrated = migrate_hook_commands(hooks, canonical_hook_commands())
+    if migrated:
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return migrated
 
 
 # ============================================================================
@@ -224,6 +420,19 @@ def save_upgrade(project_dir: Path, relative_path: str, content: str) -> None:
 # UPGRADE CLEANUP
 # ============================================================================
 
+def _has_existing_install(project_dir: Path) -> bool:
+    """True if this project already carries our files.
+
+    Covers pre-manifest installs too: those have no .manifest.json but do have
+    the hooks directory, and they are exactly the ones needing cleanup most.
+    """
+    claude = project_dir / ".claude"
+    if (claude / ".manifest.json").exists():
+        return True
+    hooks = claude / "hooks"
+    return hooks.is_dir() and any(hooks.glob("*.cjs"))
+
+
 def _upgrade_timestamp() -> str:
     """YYYYMMDDTHHMMSSZ — one folder per cleanup_obsolete call."""
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -268,7 +477,7 @@ def _partition_entries(entries: list, patterns: list) -> tuple:
 
 
 def _strip_obsolete_hooks(
-    settings_path: Path, patterns: list, backup_dir: Path, dry_run: bool
+    settings_path: Path, patterns: list, backup_fn, dry_run: bool
 ) -> list:
     """Strip hook entries whose command contains any of `patterns`. Returns stripped cmds."""
     if not patterns:
@@ -284,6 +493,10 @@ def _strip_obsolete_hooks(
         hooks[event] = kept
         all_stripped.extend(stripped)
     if all_stripped and not dry_run:
+        # Ask for the backup directory only now — calling backup_fn() eagerly
+        # created an empty timestamped folder on every upgrade that cleaned
+        # nothing.
+        backup_dir = backup_fn()
         backup_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(settings_path, backup_dir / settings_path.name)
         settings_path.write_text(
@@ -322,6 +535,18 @@ def _is_within(child: Path, root: Path) -> bool:
     return c == r or r in c.parents
 
 
+def _manifest_key(rel: str) -> str:
+    """Manifest key for a project-relative path.
+
+    OBSOLETE_FILES holds paths from the project root (`.claude/hooks/x.cjs`)
+    because that is what the filesystem operations need, while the manifest is
+    keyed from `.claude/` (`hooks/x.cjs`). Without translating between the two,
+    cleanup deletes the file and leaves its manifest entry behind for good.
+    """
+    prefix = ".claude/"
+    return rel[len(prefix):] if rel.startswith(prefix) else rel
+
+
 def _auto_inject_legacy_files(project_dir: Path, manifest: dict,
                               dry_run: bool) -> list:
     """Register OBSOLETE_FILES that exist on disk but pre-date the manifest."""
@@ -329,12 +554,12 @@ def _auto_inject_legacy_files(project_dir: Path, manifest: dict,
     existing = manifest.get("files", {})
     for rel in OBSOLETE_FILES:
         target = project_dir / rel
-        if rel in existing:
+        if _manifest_key(rel) in existing or rel in existing:
             continue
         if not target.exists() or not _is_within(target, project_dir):
             continue
         if not dry_run:
-            manifest.setdefault("files", {})[rel] = "sha256:legacy-auto-injected"
+            manifest.setdefault("files", {})[_manifest_key(rel)] = "sha256:legacy-auto-injected"
         injected.append(rel)
     return injected
 
@@ -380,14 +605,16 @@ def _cleanup_empty_local_settings(project_dir: Path, backup_fn,
 def _cleanup_file(rel: str, project_dir: Path, manifest: dict,
                   backup_fn, dry_run: bool) -> bool:
     """Remove one obsolete file (manifest-gated). Returns True if it was listed."""
-    if rel not in manifest.get("files", {}):
+    keys = [k for k in (_manifest_key(rel), rel) if k in manifest.get("files", {})]
+    if not keys:
         return False
     target = project_dir / rel
     if not _is_within(target, project_dir):
         print(f"[UPGRADE] Skipping suspicious path: {rel} (escapes project_dir)")
         return False
     if not target.exists():
-        manifest["files"].pop(rel, None)
+        for key in keys:
+            manifest["files"].pop(key, None)
         return False
     if dry_run:
         return True
@@ -395,7 +622,8 @@ def _cleanup_file(rel: str, project_dir: Path, manifest: dict,
     backup_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(target, backup_path)
     target.unlink()
-    manifest["files"].pop(rel, None)
+    for key in keys:
+        manifest["files"].pop(key, None)
     return True
 
 
@@ -432,7 +660,7 @@ def _cleanup_settings(settings_path: Path, patterns: list,
         return [c for c in _iter_hook_commands(settings_path)
                 if any(p in c for p in patterns)]
     stripped = _strip_obsolete_hooks(
-        settings_path, patterns, backup_fn(), dry_run
+        settings_path, patterns, backup_fn, dry_run
     )
     return stripped
 
@@ -477,7 +705,7 @@ def cleanup_obsolete(project_dir: Path, manifest: dict, dry_run: bool) -> dict:
     # so _cleanup_file's safety gate allows them through. Rolled back after loop.
     dry_run_injected = report["legacy_injected"] if dry_run else []
     for rel in dry_run_injected:
-        manifest.setdefault("files", {})[rel] = "sha256:legacy-auto-injected"
+        manifest.setdefault("files", {})[_manifest_key(rel)] = "sha256:legacy-auto-injected"
 
     for rel in OBSOLETE_FILES:
         if _cleanup_file(rel, project_dir, manifest, backup_fn, dry_run):
@@ -485,7 +713,7 @@ def cleanup_obsolete(project_dir: Path, manifest: dict, dry_run: bool) -> dict:
 
     # Roll back the dry-run temporary injection so the caller's manifest is pristine.
     for rel in dry_run_injected:
-        manifest.get("files", {}).pop(rel, None)
+        manifest.get("files", {}).pop(_manifest_key(rel), None)
 
     report["stripped_settings_hooks"] = _cleanup_settings(
         project_dir / ".claude" / "settings.json",
@@ -685,8 +913,13 @@ def copy_rules_and_skills(
     # Determine source directory based on language
     rules_src_dir = TEMPLATES_DIR / ("rules-ru" if lang == "ru" else "rules")
 
-    # Always copy beads workflow (always English — it's the canonical format)
-    beads_src = TEMPLATES_DIR / "rules" / "beads-workflow.md"
+    # Always copy beads workflow — it is the one rule that is not optional.
+    # Use the translated file when the language has one; every translation keeps
+    # the completion-report strings verbatim (`BEAD {ID} COMPLETE`, `Checklist:`)
+    # because validate-completion.cjs matches on them.
+    beads_src = rules_src_dir / "beads-workflow.md"
+    if not beads_src.exists():
+        beads_src = TEMPLATES_DIR / "rules" / "beads-workflow.md"
     if beads_src.exists():
         dest = rules_dir / "beads-workflow.md"
         rel_key = "rules/beads-workflow.md"
@@ -750,21 +983,16 @@ def copy_settings_and_claude_md(project_dir: Path, project_name: str) -> None:
         new_settings = json.loads(settings_src.read_text(encoding='utf-8'))
         if settings_dest.exists():
             try:
-                existing = json.loads(settings_dest.read_text(encoding='utf-8'))
-                # Merge hooks by event type
-                for event, hooks_list in new_settings.get("hooks", {}).items():
-                    existing.setdefault("hooks", {}).setdefault(event, [])
-                    existing_commands = {
-                        h["hooks"][0]["command"]
-                        for h in existing["hooks"][event]
-                        if h.get("hooks") and h["hooks"][0].get("command")
-                    }
-                    for hook in hooks_list:
-                        cmd = hook.get("hooks", [{}])[0].get("command", "")
-                        if cmd not in existing_commands:
-                            existing["hooks"][event].append(hook)
+                before = settings_dest.read_text(encoding='utf-8')
+                existing = json.loads(before)
+                migrated = merge_hooks(existing, new_settings.get("hooks", {}))
+                # The only write we make into a file the user owns. Keep the
+                # previous version reachable before touching it.
+                save_upgrade(project_dir, "settings.json.before-merge", before)
                 settings_dest.write_text(json.dumps(existing, indent=2) + "\n", encoding='utf-8')
                 print("  - settings.json (merged hooks)")
+                for old_cmd, _ in migrated:
+                    print(f"    rewrote hook path: {old_cmd[:70]}")
             except Exception:
                 shutil.copy2(settings_src, settings_dest)
                 print("  - settings.json (replaced — could not merge)")
@@ -772,6 +1000,10 @@ def copy_settings_and_claude_md(project_dir: Path, project_name: str) -> None:
             settings_dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(settings_src, settings_dest)
             print("  - settings.json")
+
+    # --- settings.local.json: same stale-path rewrite, never templated ---
+    for old_cmd, _ in migrate_local_settings_hooks(project_dir):
+        print(f"  - settings.local.json: rewrote hook path: {old_cmd[:70]}")
 
     # --- CLAUDE.md: append beads section if file exists ---
     claude_dest = project_dir / "CLAUDE.md"
@@ -781,7 +1013,11 @@ def copy_settings_and_claude_md(project_dir: Path, project_name: str) -> None:
         if claude_dest.exists():
             existing_content = claude_dest.read_text(encoding='utf-8')
             if "## Workflow" in existing_content and "beads" in existing_content.lower():
-                print("  - CLAUDE.md (already has beads section, skipped)")
+                # Never rewrite a CLAUDE.md a human has been editing — hand the
+                # current template over instead, the way rules are handed over.
+                save_upgrade(project_dir, "CLAUDE.md", beads_content)
+                print("  - CLAUDE.md (already has beads section, kept)")
+                print("    Current template saved to: .claude/.upgrades/CLAUDE.md")
             else:
                 separator = "\n\n---\n\n# Beads Orchestration\n\n"
                 with open(claude_dest, "a", encoding="utf-8") as f:
@@ -876,6 +1112,18 @@ def bootstrap_project(
     project_dir.mkdir(parents=True, exist_ok=True)
     resolved_name = project_name or infer_project_name(project_dir)
 
+    # An upgrade must not silently switch a project's language back to English:
+    # --lang is optional, and the manifest remembers what was installed.
+    installed_lang = load_manifest(project_dir).get("lang")
+    lang = lang or installed_lang or "en"
+
+    # A project that already has our files gets the cleanup pass even without
+    # --upgrade. Skipping it leaves a half-migrated mix: new hooks installed
+    # next to entries for hooks this version no longer ships.
+    if not upgrade and _has_existing_install(project_dir):
+        upgrade = True
+        print("Existing installation detected — running the upgrade cleanup too")
+
     print(f"\nBootstrapping beads orchestration for: {resolved_name}")
     print(f"Directory: {project_dir}")
     if force:
@@ -919,6 +1167,7 @@ def bootstrap_project(
         _print_cleanup_report(report, dry_run)
 
     manifest["version"] = pkg_version
+    manifest["lang"] = lang
     manifest["installed_at"] = datetime.now(timezone.utc).isoformat()
     if not dry_run:
         save_manifest(project_dir, manifest)
@@ -994,7 +1243,7 @@ def main():
     parser.add_argument("--project-name", default=None, help="Project name (auto-inferred if not provided)")
     parser.add_argument("--project-dir", default=".", help="Project directory")
     parser.add_argument("--with-rules", action="store_true", help="Also copy dev rules (implementation-standard, logging, tdd)")
-    parser.add_argument("--lang", default="en", choices=["en", "ru"], help="Language for dev rules (default: en)")
+    parser.add_argument("--lang", default=None, choices=["en", "ru"], help="Language for dev rules (default: the language this project was installed with, else en)")
     parser.add_argument("--force", action="store_true", help="Overwrite all files regardless of user modifications")
     parser.add_argument("--upgrade", action="store_true", help="Run init flow then cleanup obsolete items (uses existing manifest)")
     parser.add_argument("--dry-run", action="store_true", help="Print plan without writing anything")

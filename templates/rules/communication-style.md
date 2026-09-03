@@ -2,47 +2,42 @@
 
 ## Core rule
 
-Write in plain Russian. The goal is for a non-programmer to understand on the first read. No anglicisms, calques, or transliterations of English words when a short Russian equivalent exists.
+Write so that someone without a programming background understands on the first
+read. Answer in the language the user writes in. Plain words over jargon,
+always.
 
 ## Trigger: when this rule fires
 
-Before sending **every** response to the user. Applies to all Russian-language text — chat messages, task descriptions, code comments, commit messages.
+Before sending **every** response. Applies to all prose you produce — chat
+replies, bead titles and descriptions, commit messages, code comments, docs.
 
 ## What to do
 
-1. **Find marker words in the text and rewrite them.** Common cases:
-   - «робастный / робастность» → «надёжный / устойчивый»
-   - «итерация» (meaning «attempt / pass») → «попытка», «проход», «шаг»
-   - «реджект / реджектится» → «отклоняется / отказ»
-   - «коллбэк» → «обратный вызов»
-   - «фикс» → «исправление»
-   - «майнтейнить» → «поддерживать»
-   - «эдж-кейс» → «крайний случай»
-   - «trade-off» → «компромисс»
-   - «diminishing return» → «убывающая отдача»
-   - «overhead» → «накладные расходы»
+1. **Prefer the plain word.** "Slow" beats "suboptimal latency profile". "It
+   fails when the file is missing" beats "unhandled edge case in the I/O path".
+2. **Explain a term the first time you need it**, in parentheses, then keep
+   using it: "worktree (a second working copy of the repo, checked out on its
+   own branch)".
+3. **Say what happened, not what category it belongs to.** "The hook did not
+   run, so nothing checked the commit" beats "enforcement gap".
+4. **Numbers and names beat adjectives.** "3 of 17 tests fail" beats "several
+   tests are failing". "`bootstrap.py:412`" beats "somewhere in bootstrap".
+5. **Keep as-is:** file names, commands, code, paths, git terms, product names.
+   Do not translate or paraphrase those.
 
-2. **Any transliteration of an English term in Cyrillic is also under the rule**, if a short Russian equivalent exists:
-   - «тенант» → «арендатор»
-   - «энтити» → «сущность»
-   - «инстанс» → «экземпляр»
-   - «пейлоад» → «полезная нагрузка»
-   - «митап» → «встреча»
-   - «челлендж» → «сложная задача»
-   - «дедлайн» → «срок»
-   - «деплой» → «развёртывание»
-   - «фича» → «возможность / функция»
-   - «ассерт» → «проверка»
+## Non-English answers
 
-3. **Latin script in Russian text — replace or explain.** Exceptions that stay as-is: file names, commands, code fragments, paths, git entities, proper names, established technical terms (`git`, `npm`, `PR`, `API`).
+When the user writes in another language, answer in that language and apply the
+same rule there: an English technical term transliterated into another alphabet
+is jargon too. Use the local word when one exists; when none exists, use the
+English term and explain it once in parentheses.
 
-4. **If no short Russian equivalent exists** — use the English term and explain it in parentheses on first mention. After that — use the Russian variant or the explained English term.
-
-5. **Naturalized — leave as is:** «коммит» (in git context), «рефакторинг», «бэкенд», «фронтенд», «дебаггер».
+The Russian rule set (`--lang ru`) carries the marker-word list for Russian.
 
 ## Banned
 
-- Apologizing or adding «replaced X with Y» notes — rewrite silently
-- Using jargon when a simple Russian word exists
-- Using an English term without explanation when a Russian equivalent exists
-- Treating the marker list as closed — these are examples; the rule is broader: any transliteration of an anglicism falls under it
+- Jargon where a plain word exists
+- An unexplained term the reader has not seen before in this conversation
+- Apologising for word choice, or announcing that you rephrased something —
+  just write the better sentence
+- Padding: "it is worth noting that", "as we can see", "in order to"

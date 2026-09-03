@@ -1,24 +1,7 @@
 # IMPLEMENTATION STANDARD
 
-## Core Development Principles (HIGHEST PRIORITY)
-
-**CRITICAL:** These principles take highest priority over detailed practices.
-
-### Key fundamentals:
-
-1. **Write elegant code that solves the task**
-2. **Do not add backward compatibility unless explicitly requested**
-3. **After each code block:** lint → compile → test → run
-4. **Code must be:** clean, readable, DRY, prefer editing over adding
-5. **Avoid:** unnecessary rollbacks, excessive versioning, over-testing
-6. **Quality over speed** — better to spend time and write well
-7. **When uncertain — ask** while stating your recommendations
-
-## Process with User
-
-1. **Discussion** — explore options, clarifying questions
-2. **Specification** — formulate, break into tasks, get confirmation
-3. **Implementation** — ask **"Shall we proceed?"**, wait for confirmation
+Applies once you are writing code. How work *starts* — understanding, reuse or
+write, plan — is `pre-code-workflow.md`.
 
 ## Code Metrics
 
@@ -36,7 +19,8 @@
 
 ## Verification Cycle
 
-After each code block: lint → compile → test → run
+After each code block: lint → compile → test → run. Not at the end of the task —
+after each block, so a failure points at the last thing you wrote.
 
 ## Self-review (after completing a task)
 
@@ -52,6 +36,9 @@ Launch a subagent to review written code. Checklist:
 
 If >3 files or >50 lines changed — run `/simplify` for cleanup and refactoring.
 
-## Quality Over Speed
+## Banned
 
-Better to spend time and write well than rush and redo later.
+- Backward compatibility that nobody asked for
+- Leaving code "for reference" — deleted means deleted
+- Rushing: better to spend the time and write it well than redo it later
+- Guessing when uncertain — ask, and state your recommendation with the question

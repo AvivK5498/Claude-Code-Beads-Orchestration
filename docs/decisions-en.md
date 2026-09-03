@@ -31,7 +31,7 @@ Every decision made during the v2 → v3 rewrite. Context, alternatives, rationa
 **Key principle:** Blocking bad actions via hooks is more effective than asking "please don't do that."
 
 **Examples:**
-- "Don't commit to main" (instruction) → `enforce-branch-before-edit.cjs` physically blocks Edit/Write on main (constraint)
+- "Use bd worktree create" (instruction) → `bash-guard.cjs` blocks raw `git worktree add` (constraint)
 - "Use description when creating bead" (instruction) → `bash-guard.cjs` blocks `bd create` without `-d` (constraint)
 - "Don't skip pre-commit hooks" (instruction) → hook blocks `git --no-verify` (constraint)
 

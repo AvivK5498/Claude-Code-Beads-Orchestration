@@ -68,11 +68,11 @@ Stripped everything that doesn't improve output. Added everything that does.
 - Per-tech supervisor generation — 500+ lines of context per stack, Claude already knows these technologies
 - Agent personas ("Rex the reviewer") — based on outdated prompting patterns, just fills context
 - MCP Provider Delegator, Kanban UI, Web Interface Guidelines — unnecessary infrastructure
-- 19 bash hooks — replaced with 8 cross-platform Node.js hooks
+- 19 bash hooks — replaced with 3 cross-platform Node.js hooks
 
 **Added:**
 - Checklist verification — hook blocks completion if requirements from description aren't checked off
-- Session-start dashboard — shows open tasks, merged PRs awaiting cleanup, stale beads, recent knowledge
+- Session-start dashboard — shows what the task tracker cannot: dirty main checkout, merged PRs awaiting cleanup, worktrees left behind
 - Mandatory size check — automatic decision: single bead or epic with children
 - Plan-to-beads requirement — all planned tasks must be created as beads before implementation starts
 - LEARNED quality enforcement — specific format: problem → solution → context
@@ -95,10 +95,13 @@ Full details: [docs/decisions-en.md](docs/decisions-en.md)
   agents/
     code-reviewer.md        # Adversarial 3-phase review
     merge-supervisor.md     # Conflict resolution protocol
-  hooks/                    # 8 Node.js enforcement hooks
+  hooks/                    # 3 Node.js enforcement hooks + shared utils
   rules/
     beads-workflow.md       # Task lifecycle, bd command reference
+    pre-code-workflow.md    # Three gates before any edit
     implementation-standard.md
+    communication-style.md
+    debugging-standard.md
     logging-standard.md
     tdd-workflow.md
     resilience-standard.md
@@ -250,7 +253,7 @@ For changes under 10 lines on a feature branch. Hard blocked on main.
 
 ```bash
 git checkout -b fix-typo     # must be off main
-# edit → hook asks for confirmation → commit
+# edit → commit
 ```
 
 ### Completion verification
@@ -266,14 +269,15 @@ Subagents are blocked from finishing unless:
 
 | Hook | Event | Enforcement |
 |------|-------|-------------|
-| enforce-branch-before-edit | PreToolUse (Edit/Write) | Blocks edits on main. Asks confirmation on feature branches with file name and change size. |
-| bash-guard | PreToolUse (Bash) | Blocks `--no-verify`. Requires description on `bd create`. Validates epic close (all children done, PR merged). |
+| bash-guard | PreToolUse (Bash) | Blocks `--no-verify` and raw `git worktree add`. Requires description on `bd create`. Validates epic close (all children done, PR merged). Every command in a chain is checked, not just the first. |
 | validate-completion | SubagentStop | Checks worktree, push, status, checklist, comment, verbosity. |
-| memory-capture | PostToolUse (Bash) | Extracts LEARNED entries → `.beads/memory/knowledge.jsonl` with auto-tags. |
-| session-start | SessionStart | Surfaces tasks, merged PRs, knowledge, ACTION REQUIRED reminders. |
-| nudge-claude-md-update | PreCompact | Reminds to update CLAUDE.md before context compaction. |
-| hook-utils | — | Shared utilities: getField, parseBeadId, deny/ask/block, execCommand. |
-| recall | — | Knowledge base search: `node .beads/memory/recall.cjs "keyword"`. |
+| session-start | SessionStart | Dirty main checkout, worktrees of merged branches, open PRs. Task listing is left to `bd prime`. |
+| hook-utils | — | Shared utilities: project-dir resolution, command splitting, deny/ask/block, execCommand. |
+
+Hook commands resolve `.claude/hooks/` from `CLAUDE_PROJECT_DIR` rather than a relative
+path: a hook process inherits the working directory of the last Bash call, so a relative
+path stops resolving as soon as work moves into a subdirectory — and Claude Code reports
+that as non-blocking, leaving the hook silently absent.
 
 ## Dev Rules
 
@@ -281,7 +285,10 @@ Included by default. Skip with `--no-rules`. Russian version: `npx claude-protoc
 
 | Rule | What it does |
 |------|-------------|
-| implementation-standard | Dev process with user confirmation. Code metrics (function < 30 lines, class < 200, nesting < 4). Self-review with `/simplify` trigger. |
+| pre-code-workflow | Trigger-based: three gates before touching code — entry points and an understanding table, reuse-or-write with `file:line` risks, a 7–15 item plan with an explicit out-of-scope section. Hands off to beads-workflow once the plan is accepted. |
+| implementation-standard | Applies while writing code. Metrics (function < 30 lines, class < 200, nesting < 4). Rule of 3 alternatives. Self-review with `/simplify` trigger. |
+| communication-style | Trigger-based: fires before every reply. Plain words over jargon, explain a term at first use, numbers instead of adjectives. |
+| debugging-standard | Trigger-based: "the same error survived a deliberate fix" → stop repeating, search memory, read the source, then three alternatives. |
 | logging-standard | Trigger-based: "creating API endpoint → add logging". Covers external calls, payments, auth, background jobs. Sentry + Seq. |
 | tdd-workflow | Trigger-based: "new function → write test first". RED → GREEN → REFACTOR cycle. Clear exceptions (configs, DTOs, migrations). |
 | resilience-standard | Trigger-based: "calling external API → what if timeout/5xx?". Covers DB, payments, files, background jobs. Strategies: retry, fallback, circuit breaker, compensation. |

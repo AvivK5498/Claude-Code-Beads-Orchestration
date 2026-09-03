@@ -149,4 +149,46 @@ describe('bash-guard hook', () => {
       expect(result.stdout).toContain('deny');
     });
   });
+
+  describe('command chains', () => {
+    it('denies git commit --no-verify hidden behind cd', () => {
+      const result = runHook(makeInput('cd packages/db && git commit --no-verify -m "x"'));
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain('deny');
+      expect(result.stdout).toContain('--no-verify');
+    });
+
+    it('denies git worktree add hidden behind cd', () => {
+      const result = runHook(makeInput('cd .. && git worktree add ../foo -b mybranch'));
+      expect(result.stdout).toContain('deny');
+      expect(result.stdout).toContain('bd worktree create');
+    });
+
+    it('denies bd create without description later in a chain', () => {
+      const result = runHook(makeInput('git status && bd create "Task"'));
+      expect(result.stdout).toContain('deny');
+      expect(result.stdout).toContain('description');
+    });
+
+    it('checks every command, not just the first guarded one', () => {
+      const result = runHook(makeInput('git status && echo ok && bd create "Task"'));
+      expect(result.stdout).toContain('deny');
+    });
+
+    it('allows a chain where every command is fine', () => {
+      const result = runHook(makeInput('cd packages/db && git status && ls'));
+      expect(result.stdout).toBe('');
+    });
+
+    it('does not deny --no-verify quoted inside another command', () => {
+      const result = runHook(makeInput('echo "--no-verify is blocked" && git status'));
+      expect(result.stdout).toBe('');
+    });
+
+    it('does not deny a flag that belongs to a different command', () => {
+      const result = runHook(makeInput('npm test --no-verify'));
+      expect(result.stdout).toBe('');
+    });
+  });
+
 });

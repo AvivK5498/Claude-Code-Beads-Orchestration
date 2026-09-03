@@ -3,6 +3,12 @@
  *
  * Replaces bash+jq patterns with cross-platform Node.js equivalents.
  * No external dependencies — only Node.js built-ins.
+ *
+ * cwd contract: a hook process does NOT run in the project root — it inherits
+ * the working directory of the last Bash tool call. Everything path-related
+ * here is therefore anchored to getProjectDir(), and hook commands in
+ * settings.json resolve this file through CLAUDE_PROJECT_DIR (see the
+ * `node -e` wrapper written by bootstrap.py) instead of a relative path.
  */
 
 'use strict';
@@ -134,6 +140,12 @@ function execCommand(cmd, args, opts) {
       encoding: 'utf8',
       timeout: 10000,
       stdio: ['pipe', 'pipe', 'pipe'],
+      // Anchor to the project root, not the hook's inherited cwd. Without
+      // this, git/bd/gh answer about whatever directory the Bash tool last
+      // used — a worktree, a subdirectory, or a path outside the repo — and
+      // every check built on the answer silently passes. Callers may still
+      // override via opts.cwd.
+      cwd: getProjectDir(),
       // On Windows, npm CLIs (bd, gh) are .cmd wrappers that
       // execFileSync can't find without shell. Args stay as array
       // so Node still escapes them properly — no injection risk.
@@ -175,8 +187,23 @@ function getCurrentBranch() {
 // Project helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Absolute path of the project root.
+ *
+ * NEVER resolve project paths from process.cwd() alone: a hook process
+ * inherits the working directory of the last Bash tool call, so it drifts
+ * into subdirectories and worktrees (measured — hook cwd == Bash tool cwd).
+ * Resolution order:
+ *   1. CLAUDE_PROJECT_DIR — set by Claude Code for hook processes (measured).
+ *   2. <this file>/../.. — hooks always live in <project>/.claude/hooks/.
+ *   3. process.cwd() — last resort.
+ */
 function getProjectDir() {
-  return process.env.CLAUDE_PROJECT_DIR || process.cwd();
+  const fromEnv = process.env.CLAUDE_PROJECT_DIR;
+  if (fromEnv) return fromEnv;
+  const fromHere = path.resolve(__dirname, '..', '..');
+  if (fs.existsSync(path.join(fromHere, '.claude'))) return fromHere;
+  return process.cwd();
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +243,62 @@ function containsPathSegment(filePath, segment) {
   const normalised = filePath.replace(/\\/g, '/');
   return normalised.includes('/' + segment + '/') ||
     normalised.endsWith('/' + segment);
+}
+
+// ---------------------------------------------------------------------------
+// Command parsing
+// ---------------------------------------------------------------------------
+
+/**
+ * Split a shell command line into the commands a guard must inspect one by one.
+ *
+ * A guard that looks at the first word of the whole string sees only `cd` in
+ * `cd sub && git commit --no-verify` and lets the rest through. Splitting on
+ * the chaining operators gives every command its own turn.
+ *
+ * Quoted text is never split, so `echo "a && b"` stays a single command.
+ * Command substitution (`$(...)`, backticks) is deliberately NOT split: doing
+ * so would tear flags away from the command they belong to, which loses more
+ * checks than it gains.
+ *
+ *   splitCommandSegments('cd x && git push | tee log')
+ *     → ['cd x', 'git push', 'tee log']
+ */
+function splitCommandSegments(command) {
+  if (!command) return [];
+  const segments = [];
+  let current = '';
+  let quote = '';
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+
+    if (quote) {
+      current += ch;
+      if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if ((ch === '&' || ch === '|') && command[i + 1] === ch) {
+      segments.push(current);
+      current = '';
+      i++;
+      continue;
+    }
+    if (ch === ';' || ch === '&' || ch === '|' || ch === '\n') {
+      segments.push(current);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  segments.push(current);
+
+  return segments.map(s => s.trim()).filter(Boolean);
 }
 
 // ---------------------------------------------------------------------------
@@ -310,6 +393,7 @@ module.exports = {
   parseBeadId,
   parseEpicId,
   containsPathSegment,
+  splitCommandSegments,
   isSubagent,
   logError,
   runHook,

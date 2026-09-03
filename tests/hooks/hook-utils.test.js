@@ -117,3 +117,133 @@ describe('containsPathSegment', () => {
     expect(containsPathSegment('/project/.claude/plans/plan.md', '.claude')).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Project-directory anchoring
+// ---------------------------------------------------------------------------
+// A hook process inherits the working directory of the last Bash tool call,
+// so process.cwd() may be a subdirectory, a worktree, or a path outside the
+// repo. Nothing path-related may depend on it.
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const utilsPath = require.resolve('../../templates/hooks/hook-utils.cjs');
+const { getProjectDir, getRepoRoot, execCommand } = require(utilsPath);
+const repoRoot = path.resolve(__dirname, '..', '..');
+
+/** Copy hook-utils into a throwaway <tmp>/.claude/hooks/ and load that copy. */
+function loadInstalledCopy() {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'cp-hooks-'));
+  const hooks = path.join(project, '.claude', 'hooks');
+  fs.mkdirSync(hooks, { recursive: true });
+  const dest = path.join(hooks, 'hook-utils.cjs');
+  fs.copyFileSync(utilsPath, dest);
+  return { project, mod: require(dest) };
+}
+
+function withEnv(value, fn) {
+  const saved = process.env.CLAUDE_PROJECT_DIR;
+  if (value === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+  else process.env.CLAUDE_PROJECT_DIR = value;
+  try {
+    return fn();
+  } finally {
+    if (saved === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+    else process.env.CLAUDE_PROJECT_DIR = saved;
+  }
+}
+
+function withCwd(dir, fn) {
+  const saved = process.cwd();
+  process.chdir(dir);
+  try {
+    return fn();
+  } finally {
+    process.chdir(saved);
+  }
+}
+
+describe('getProjectDir', () => {
+  it('prefers CLAUDE_PROJECT_DIR', () => {
+    withEnv('M:/somewhere/else', () => {
+      expect(getProjectDir()).toBe('M:/somewhere/else');
+    });
+  });
+
+  it('falls back to the project that owns the hook file, not the cwd', () => {
+    const { project, mod } = loadInstalledCopy();
+    withEnv(undefined, () => {
+      withCwd(os.tmpdir(), () => {
+        expect(fs.realpathSync(mod.getProjectDir())).toBe(fs.realpathSync(project));
+      });
+    });
+  });
+
+  it('ignores the cwd even when it is a subdirectory of the project', () => {
+    withEnv(undefined, () => {
+      withCwd(path.join(repoRoot, 'templates', 'hooks'), () => {
+        expect(fs.realpathSync(getProjectDir())).toBe(fs.realpathSync(repoRoot));
+      });
+    });
+  });
+});
+
+describe('execCommand cwd anchoring', () => {
+  it('asks git about the project, not about the inherited cwd', () => {
+    withEnv(repoRoot, () => {
+      withCwd(os.tmpdir(), () => {
+        const root = getRepoRoot();
+        expect(root).not.toBeNull();
+        expect(fs.realpathSync(root)).toBe(fs.realpathSync(repoRoot));
+      });
+    });
+  });
+
+  it('still lets the caller override cwd explicitly', () => {
+    const out = execCommand('git', ['rev-parse', '--show-toplevel'], { cwd: os.tmpdir() });
+    // os.tmpdir() is not a repository, so git fails and execCommand returns null
+    expect(out).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// splitCommandSegments
+// ---------------------------------------------------------------------------
+
+const { splitCommandSegments } = require('../../templates/hooks/hook-utils.cjs');
+
+describe('splitCommandSegments', () => {
+  it('returns a single command unchanged', () => {
+    expect(splitCommandSegments('git status')).toEqual(['git status']);
+  });
+
+  it('splits on && so a guarded command cannot hide behind cd', () => {
+    expect(splitCommandSegments('cd sub && git commit --no-verify'))
+      .toEqual(['cd sub', 'git commit --no-verify']);
+  });
+
+  it('splits on ||, ; , | and newlines', () => {
+    expect(splitCommandSegments('a || b ; c | d')).toEqual(['a', 'b', 'c', 'd']);
+    expect(splitCommandSegments('a\nb')).toEqual(['a', 'b']);
+  });
+
+  it('splits on a single & (background)', () => {
+    expect(splitCommandSegments('sleep 1 & git push')).toEqual(['sleep 1', 'git push']);
+  });
+
+  it('does not split inside double quotes', () => {
+    expect(splitCommandSegments('echo "a && b"')).toEqual(['echo "a && b"']);
+  });
+
+  it('does not split inside single quotes', () => {
+    expect(splitCommandSegments("git commit -m 'fix; also fix'"))
+      .toEqual(["git commit -m 'fix; also fix'"]);
+  });
+
+  it('drops empty segments from trailing operators', () => {
+    expect(splitCommandSegments('git status &&')).toEqual(['git status']);
+    expect(splitCommandSegments('')).toEqual([]);
+  });
+});

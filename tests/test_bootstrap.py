@@ -1,6 +1,9 @@
 """Tests for bootstrap.py — project name inference, copy_and_replace, setup_gitignore, manifest."""
 
 import json
+import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -30,6 +33,15 @@ from bootstrap import (
     _auto_inject_legacy_files,
     _memory_dir_should_skip,
     _cleanup_empty_local_settings,
+    _manifest_key,
+    _has_existing_install,
+    copy_settings_and_claude_md,
+    _hook_basename,
+    _entry_key,
+    canonical_hook_commands,
+    migrate_hook_commands,
+    migrate_local_settings_hooks,
+    merge_hooks,
     TEMPLATES_DIR,
 )
 
@@ -364,10 +376,12 @@ class TestTemplatesDir:
         assert TEMPLATES_DIR.exists(), f"Templates dir not found: {TEMPLATES_DIR}"
 
     def test_has_hooks(self):
+        """The shared library plus at least one hook. The exact set is pinned
+        against settings.json in TestHookCommandShape, so no count lives here."""
         hooks_dir = TEMPLATES_DIR / "hooks"
         assert hooks_dir.exists()
-        hooks = list(hooks_dir.glob("*.cjs"))
-        assert len(hooks) >= 6  # At least 6 hook files
+        assert (hooks_dir / "hook-utils.cjs").exists()
+        assert {f.name for f in hooks_dir.glob("*.cjs")} - {"hook-utils.cjs"}
 
     def test_has_agents(self):
         agents_dir = TEMPLATES_DIR / "agents"
@@ -769,6 +783,24 @@ class TestCleanupObsolete:
                 _sh.rmtree(external_dir)
 
 
+    def test_clean_upgrade_leaves_no_empty_backup_folder(self, tmp_path, monkeypatch):
+        """An upgrade with nothing to clean used to create an empty timestamped
+        directory anyway, because the backup path was computed eagerly."""
+        monkeypatch.setattr(bootstrap, "OBSOLETE_FILES", [])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_DIRS", [])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_SETTINGS_HOOKS", ["nothing-matches-this"])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_LOCAL_SETTINGS_PATTERNS", [])
+        claude = tmp_path / ".claude"
+        claude.mkdir()
+        (claude / "settings.json").write_text(json.dumps({"hooks": {"PreToolUse": [
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": "node keep.cjs"}]}]}}),
+            encoding="utf-8")
+
+        report = cleanup_obsolete(tmp_path, {"files": {}}, dry_run=False)
+
+        assert report["backups"] == [None]
+        assert not (claude / ".upgrades").exists()
+
 # ============================================================================
 # bd-3 logic: legacy auto-inject, knowledge.jsonl guard, empty-settings cleanup
 # ============================================================================
@@ -777,7 +809,11 @@ class TestBd3Logic:
     # --- _auto_inject_legacy_files --------------------------------------
 
     def test_auto_inject_legacy_files_adds_existing_unmanaged(self, tmp_path, monkeypatch):
-        """File exists on disk, not in manifest → injected with sentinel hash."""
+        """File exists on disk, not in manifest → injected with sentinel hash.
+
+        The injected key is .claude-relative, the same shape copy_hooks writes,
+        so cleanup later removes the real entry instead of adding a second one.
+        """
         monkeypatch.setattr(bootstrap, "OBSOLETE_FILES", [".claude/hooks/memory-capture.cjs"])
         target = tmp_path / ".claude" / "hooks" / "memory-capture.cjs"
         target.parent.mkdir(parents=True)
@@ -787,7 +823,7 @@ class TestBd3Logic:
         injected = _auto_inject_legacy_files(tmp_path, manifest, dry_run=False)
 
         assert injected == [".claude/hooks/memory-capture.cjs"]
-        assert manifest["files"][".claude/hooks/memory-capture.cjs"] == "sha256:legacy-auto-injected"
+        assert manifest["files"]["hooks/memory-capture.cjs"] == "sha256:legacy-auto-injected"
 
     def test_auto_inject_legacy_files_skips_missing(self, tmp_path, monkeypatch):
         """Path not on disk → not injected."""
@@ -1123,3 +1159,522 @@ class TestBdDoctorSoftFailure:
         assert "line 0" in out
         assert "line 19" in out
         assert "line 20" not in out  # Truncated at 20
+
+# ============================================================================
+# Hook command paths (CLAUDE_PROJECT_DIR resolution)
+# ============================================================================
+# A hook process inherits the cwd of the last Bash tool call, so a relative
+# command path breaks as soon as the agent works in a subdirectory or a
+# worktree — and Claude Code reports that failure as non-blocking, i.e. the
+# tool call proceeds with the hook silently absent. These tests pin the fix
+# from both ends: the shape of the command we write, and the rewrite of stale
+# commands on upgrade.
+
+OLD_COMMAND_FORMS = [
+    "node .claude/hooks/bash-guard.cjs",
+    "node ./.claude/hooks/bash-guard.cjs",
+    'node "$CLAUDE_PROJECT_DIR/.claude/hooks/bash-guard.cjs"',
+    "node C:/repos/demo/.claude/hooks/bash-guard.cjs",
+]
+
+
+def _template_hooks():
+    return json.loads(
+        (TEMPLATES_DIR / "settings.json").read_text(encoding="utf-8")
+    )["hooks"]
+
+
+class TestHookCommandShape:
+    def test_no_command_uses_a_relative_path(self):
+        """Relative command paths are the bug — none may survive in the template."""
+        for event, entries in _template_hooks().items():
+            for entry in entries:
+                cmd = entry["hooks"][0]["command"]
+                assert "CLAUDE_PROJECT_DIR" in cmd, f"{event}: {cmd}"
+                assert not cmd.startswith("node .claude"), f"{event}: {cmd}"
+                assert not cmd.startswith("node ./"), f"{event}: {cmd}"
+
+    def test_no_command_relies_on_shell_variable_expansion(self):
+        """`$CLAUDE_PROJECT_DIR` is expanded by the shell, and hook commands run
+        under PowerShell when Git Bash is absent — there it collapses to an
+        empty string. The variable must be read inside Node instead."""
+        for entries in _template_hooks().values():
+            for entry in entries:
+                cmd = entry["hooks"][0]["command"]
+                assert "$CLAUDE_PROJECT_DIR" not in cmd
+                assert "process.env.CLAUDE_PROJECT_DIR" in cmd
+
+    def test_no_command_contains_a_raw_newline(self):
+        """A newline inside the JS string literal turns the command into a
+        syntax error — easy to introduce when escaping the JSON by hand."""
+        for entries in _template_hooks().values():
+            for entry in entries:
+                assert chr(10) not in entry["hooks"][0]["command"]
+
+    def test_canonical_map_covers_every_shipped_hook(self):
+        """Every hook file we install needs a command; hook-utils is a shared
+        library, not a hook."""
+        shipped = {
+            f.name for f in (TEMPLATES_DIR / "hooks").glob("*.cjs")
+            if f.name != "hook-utils.cjs"
+        }
+        assert shipped == set(canonical_hook_commands())
+
+    @pytest.mark.parametrize("cmd", OLD_COMMAND_FORMS)
+    def test_hook_basename_recognises_old_forms(self, cmd):
+        assert _hook_basename(cmd) == "bash-guard.cjs"
+
+    def test_hook_basename_ignores_foreign_commands(self):
+        assert _hook_basename("./scripts/my-own-hook.sh") == ""
+        assert _hook_basename("") == ""
+
+    def test_entry_key_separates_matchers(self):
+        """Edit and Write carry the same command — keying on the command alone
+        would drop one of the two entries."""
+        spec = {"hooks": [{"type": "command", "command": "node x.cjs"}]}
+        assert _entry_key(dict(spec, matcher="Edit")) != _entry_key(dict(spec, matcher="Write"))
+
+
+class TestHookPathMigration:
+    @pytest.mark.parametrize("cmd", OLD_COMMAND_FORMS)
+    def test_rewrites_every_old_form(self, cmd):
+        hooks = {"PreToolUse": [
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": cmd}]},
+        ]}
+        canonical = canonical_hook_commands()
+
+        migrated = migrate_hook_commands(hooks, canonical)
+
+        assert migrated == [(cmd, canonical["bash-guard.cjs"])]
+        assert hooks["PreToolUse"][0]["hooks"][0]["command"] == canonical["bash-guard.cjs"]
+
+    def test_leaves_a_user_hook_that_shares_our_file_name(self):
+        """A user's own scripts/session-start.cjs is not ours to repoint —
+        matching on the file name alone would hijack it."""
+        own = "node scripts/session-start.cjs"
+        hooks = {"SessionStart": [{"hooks": [
+            {"type": "command", "command": own}]}]}
+
+        assert migrate_hook_commands(hooks, canonical_hook_commands()) == []
+        assert hooks["SessionStart"][0]["hooks"][0]["command"] == own
+
+    def test_keeps_malformed_entries_instead_of_collapsing_them(self):
+        existing = {"hooks": {"PreToolUse": ["broken-one", "broken-two"]}}
+        merge_hooks(existing, _template_hooks())
+        assert "broken-one" in existing["hooks"]["PreToolUse"]
+        assert "broken-two" in existing["hooks"]["PreToolUse"]
+
+    def test_leaves_a_user_own_hook_untouched(self):
+        own = "node scripts/my-own-hook.cjs"
+        hooks = {"PreToolUse": [
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": own}]},
+        ]}
+
+        assert migrate_hook_commands(hooks, canonical_hook_commands()) == []
+        assert hooks["PreToolUse"][0]["hooks"][0]["command"] == own
+
+    def test_rewrites_our_hook_under_an_unexpected_event(self):
+        """An older install may have put our hook on a different event."""
+        hooks = {"PostToolUse": [
+            {"matcher": "Bash", "hooks": [
+                {"type": "command", "command": "node .claude/hooks/session-start.cjs"}]},
+        ]}
+
+        migrated = migrate_hook_commands(hooks, canonical_hook_commands())
+
+        assert len(migrated) == 1
+        assert "CLAUDE_PROJECT_DIR" in hooks["PostToolUse"][0]["hooks"][0]["command"]
+
+    def test_already_canonical_is_not_reported(self):
+        canonical = canonical_hook_commands()
+        hooks = {"PreToolUse": [
+            {"matcher": "Bash", "hooks": [
+                {"type": "command", "command": canonical["bash-guard.cjs"]}]},
+        ]}
+        assert migrate_hook_commands(hooks, canonical) == []
+
+    def test_tolerates_malformed_entries(self):
+        hooks = {"PreToolUse": ["not-a-dict", {}, {"hooks": []}], "Bogus": "not-a-list"}
+        assert migrate_hook_commands(hooks, canonical_hook_commands()) == []
+
+
+class TestMergeHooks:
+    def test_upgrade_rewrites_instead_of_duplicating(self):
+        """The upgrade trap: deduplicating by command string alone keeps the old
+        relative entry and appends the new one, so the broken hook keeps firing
+        next to the fixed one."""
+        existing = {"hooks": {
+            "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command",
+                            "command": "node .claude/hooks/bash-guard.cjs"}]}],
+            "SessionStart": [{"hooks": [{"type": "command",
+                              "command": "node .claude/hooks/session-start.cjs"}]}],
+            "SubagentStop": [{"hooks": [{"type": "command",
+                              "command": "node .claude/hooks/validate-completion.cjs"}]}],
+        }}
+
+        migrated = merge_hooks(existing, _template_hooks())
+
+        assert len(migrated) == 3
+        for event, entries in existing["hooks"].items():
+            assert len(entries) == 1, f"{event} gained a duplicate entry"
+            assert "CLAUDE_PROJECT_DIR" in entries[0]["hooks"][0]["command"]
+
+    def test_keeps_one_command_registered_under_two_matchers(self):
+        """Deduplicating on the command alone would drop one of the two."""
+        spec = [{"type": "command", "command": "node scripts/mine.cjs"}]
+        existing = {"hooks": {"PreToolUse": [
+            {"matcher": "Edit", "hooks": spec},
+            {"matcher": "Write", "hooks": spec},
+        ]}}
+
+        merge_hooks(existing, _template_hooks())
+
+        matchers = [e.get("matcher") for e in existing["hooks"]["PreToolUse"]]
+        assert matchers.count("Edit") == 1
+        assert matchers.count("Write") == 1
+
+    def test_merge_is_idempotent(self):
+        template = _template_hooks()
+        existing = {"hooks": {}}
+        merge_hooks(existing, template)
+        first = json.dumps(existing, sort_keys=True)
+
+        merge_hooks(existing, template)
+
+        assert json.dumps(existing, sort_keys=True) == first
+
+    def test_preserves_foreign_hooks_and_other_settings(self):
+        own = {"matcher": "Bash", "hooks": [{"type": "command", "command": "./my.sh"}]}
+        existing = {"permissions": {"allow": ["Bash(ls)"]},
+                    "hooks": {"PreToolUse": [own]}}
+
+        merge_hooks(existing, _template_hooks())
+
+        assert own in existing["hooks"]["PreToolUse"]
+        assert existing["permissions"] == {"allow": ["Bash(ls)"]}
+
+    def test_collapses_pre_existing_duplicates(self):
+        dup = {"matcher": "Bash", "hooks": [{"type": "command",
+               "command": "node .claude/hooks/bash-guard.cjs"}]}
+        existing = {"hooks": {"PreToolUse": [dict(dup), dict(dup)]}}
+
+        merge_hooks(existing, _template_hooks())
+
+        bash_entries = [e for e in existing["hooks"]["PreToolUse"]
+                        if e.get("matcher") == "Bash"]
+        assert len(bash_entries) == 1
+
+    def test_repairs_non_dict_hooks_section(self):
+        existing = {"hooks": "broken"}
+        merge_hooks(existing, _template_hooks())
+        assert isinstance(existing["hooks"], dict)
+        assert "PreToolUse" in existing["hooks"]
+
+
+class TestMigrateLocalSettings:
+    def test_rewrites_local_settings_and_keeps_the_rest(self, tmp_path):
+        claude = tmp_path / ".claude"
+        claude.mkdir()
+        local = claude / "settings.local.json"
+        local.write_text(json.dumps({
+            "permissions": {"allow": ["Bash(ls)"]},
+            "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+                {"type": "command", "command": "node .claude/hooks/bash-guard.cjs"}]}]},
+        }), encoding="utf-8")
+
+        migrated = migrate_local_settings_hooks(tmp_path)
+
+        assert len(migrated) == 1
+        data = json.loads(local.read_text(encoding="utf-8"))
+        assert "CLAUDE_PROJECT_DIR" in data["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        assert data["permissions"] == {"allow": ["Bash(ls)"]}
+
+    def test_no_file_is_not_an_error(self, tmp_path):
+        assert migrate_local_settings_hooks(tmp_path) == []
+
+    def test_unreadable_file_is_not_an_error(self, tmp_path):
+        claude = tmp_path / ".claude"
+        claude.mkdir()
+        (claude / "settings.local.json").write_text("{ not json", encoding="utf-8")
+        assert migrate_local_settings_hooks(tmp_path) == []
+
+
+class TestWrapperRunsFromAnyCwd:
+    """The command string executed by the real platform shell.
+
+    This is the test that would have caught the original bug: it runs the
+    command from a subdirectory, which is exactly where the relative path
+    failed while reporting success to the user.
+    """
+
+    def _probe_command(self, hook_name="probe.cjs"):
+        canonical = canonical_hook_commands()["bash-guard.cjs"]
+        return canonical.rsplit(" ", 1)[0] + " " + hook_name
+
+    def _make_project(self, tmp_path):
+        hooks = tmp_path / ".claude" / "hooks"
+        hooks.mkdir(parents=True)
+        (hooks / "probe.cjs").write_text(
+            "process.stdout.write('PROBE_OK ' + process.cwd());", encoding="utf-8"
+        )
+        subdir = tmp_path / "packages" / "db"
+        subdir.mkdir(parents=True)
+        return subdir
+
+    @pytest.mark.parametrize("where", ["root", "subdir"])
+    def test_hook_is_found_from_root_and_from_subdirectory(self, tmp_path, where):
+        if not shutil.which("node"):
+            pytest.skip("node not available")
+        subdir = self._make_project(tmp_path)
+        cwd = tmp_path if where == "root" else subdir
+
+        result = subprocess.run(
+            self._probe_command(), cwd=cwd, shell=True,
+            env=dict(os.environ, CLAUDE_PROJECT_DIR=str(tmp_path)),
+            capture_output=True, text=True, timeout=60,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "PROBE_OK" in result.stdout, result.stderr
+
+    def test_missing_hook_file_fails_open_with_one_line(self, tmp_path):
+        """A stale entry must not print a Node stack trace: exit 0, and name the
+        file that is missing."""
+        if not shutil.which("node"):
+            pytest.skip("node not available")
+        subdir = self._make_project(tmp_path)
+
+        result = subprocess.run(
+            self._probe_command("not-installed.cjs"), cwd=subdir, shell=True,
+            env=dict(os.environ, CLAUDE_PROJECT_DIR=str(tmp_path)),
+            capture_output=True, text=True, timeout=60,
+        )
+
+        assert result.returncode == 0
+        assert "hook not found" in result.stderr
+        assert "Cannot find module" not in result.stderr
+
+
+# ============================================================================
+# Rule sets (en / ru)
+# ============================================================================
+# Rules are loaded into every session as project instructions, so drift between
+# the two sets is invisible until someone reads the wrong language — and size
+# is a permanent context cost paid by every user.
+
+RULES_EN = TEMPLATES_DIR / "rules"
+RULES_RU = TEMPLATES_DIR / "rules-ru"
+
+# validate-completion.cjs matches these literally in a subagent's final report.
+# A translation that localises them would block every completed task.
+REPORT_MARKERS = ["BEAD {BEAD_ID} COMPLETE", "Checklist:"]
+
+
+def _cyrillic(text):
+    return [c for c in text if "Ѐ" <= c <= "ӿ"]
+
+
+class TestRuleSets:
+    def test_both_sets_hold_the_same_files(self):
+        assert {f.name for f in RULES_EN.glob("*.md")} == {f.name for f in RULES_RU.glob("*.md")}
+
+    def test_english_set_is_in_english(self):
+        """communication-style once shipped an English rule demanding Russian
+        prose, so English installs told the agent to answer in Russian."""
+        for rule in RULES_EN.glob("*.md"):
+            found = _cyrillic(rule.read_text(encoding="utf-8"))
+            assert not found, f"{rule.name}: {len(found)} Cyrillic characters"
+
+    def test_russian_set_is_in_russian(self):
+        for rule in RULES_RU.glob("*.md"):
+            assert _cyrillic(rule.read_text(encoding="utf-8")), f"{rule.name} is not translated"
+
+    @pytest.mark.parametrize("rules_dir", [RULES_EN, RULES_RU], ids=["en", "ru"])
+    def test_beads_workflow_keeps_the_report_format(self, rules_dir):
+        """bootstrap installs the translated beads-workflow when one exists, so
+        every translation must keep the strings the hook matches."""
+        text = (rules_dir / "beads-workflow.md").read_text(encoding="utf-8")
+        for marker in REPORT_MARKERS:
+            assert marker in text, f"{rules_dir.name}/beads-workflow.md lost '{marker}'"
+
+    @pytest.mark.parametrize("rules_dir", [RULES_EN, RULES_RU], ids=["en", "ru"])
+    def test_every_rule_states_when_it_fires(self, rules_dir):
+        """Rules are trigger-based: a rule with no trigger is a reference
+        document, and reference documents belong in docs/, not in context."""
+        for rule in rules_dir.glob("*.md"):
+            text = (rule.read_text(encoding="utf-8")).lower()
+            assert any(w in text for w in ("trigger", "триггер", "when", "когда")), rule.name
+
+    def test_pre_code_workflow_defers_to_beads_workflow(self):
+        """The gates end at the plan; sizing and bead creation live in
+        beads-workflow.md. Restating them there would be a second copy."""
+        for rules_dir in (RULES_EN, RULES_RU):
+            text = (rules_dir / "pre-code-workflow.md").read_text(encoding="utf-8")
+            assert "beads-workflow.md" in text
+
+    def test_implementation_standard_defers_to_pre_code_workflow(self):
+        """The 'process with user' section moved out; a pointer stays behind."""
+        for rules_dir in (RULES_EN, RULES_RU):
+            text = (rules_dir / "implementation-standard.md").read_text(encoding="utf-8")
+            assert "pre-code-workflow.md" in text
+
+    def test_rule_set_stays_within_its_context_budget(self):
+        """A ceiling, not a target: rules are paid for on every single session,
+        so growth has to be a deliberate decision, not a drift."""
+        for rules_dir in (RULES_EN, RULES_RU):
+            total = sum(len(f.read_text(encoding="utf-8")) for f in rules_dir.glob("*.md"))
+            assert total < 20000, f"{rules_dir.name}: {total} characters"
+
+
+# ============================================================================
+# Upgrading an existing installation
+# ============================================================================
+# Measured against a synthetic v3.5.0 project: the gaps below all produced a
+# half-migrated state that looked like a successful upgrade.
+
+
+def _stub_heavy_steps(monkeypatch):
+    """Everything that talks to the network, bd, or git."""
+    monkeypatch.setattr(bootstrap, "install_beads", lambda pd: True)
+    monkeypatch.setattr(bootstrap, "copy_agents", lambda *a, **kw: [])
+    monkeypatch.setattr(bootstrap, "copy_hooks", lambda *a, **kw: None)
+    monkeypatch.setattr(bootstrap, "copy_rules_and_skills", lambda *a, **kw: [])
+    monkeypatch.setattr(bootstrap, "copy_settings_and_claude_md", lambda *a, **kw: None)
+    monkeypatch.setattr(bootstrap, "setup_gitignore", lambda *a, **kw: None)
+    monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda *a, **kw: None)
+
+
+class TestManifestKey:
+    def test_strips_the_claude_prefix(self):
+        """OBSOLETE_FILES are project-relative, manifest keys are .claude-relative."""
+        assert _manifest_key(".claude/hooks/x.cjs") == "hooks/x.cjs"
+
+    def test_leaves_other_paths_alone(self):
+        assert _manifest_key(".beads/memory/recall.cjs") == ".beads/memory/recall.cjs"
+
+    def test_cleanup_removes_the_manifest_entry_it_installed(self, tmp_path, monkeypatch):
+        """Deleting the file but keeping its key left dead entries forever."""
+        monkeypatch.setattr(bootstrap, "OBSOLETE_FILES", [".claude/hooks/gone.cjs"])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_DIRS", [])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_SETTINGS_HOOKS", [])
+        monkeypatch.setattr(bootstrap, "OBSOLETE_LOCAL_SETTINGS_PATTERNS", [])
+        hooks = tmp_path / ".claude" / "hooks"
+        hooks.mkdir(parents=True)
+        (hooks / "gone.cjs").write_text("// old hook", encoding="utf-8")
+        manifest = {"files": {"hooks/gone.cjs": "sha256:abc"}}
+
+        report = cleanup_obsolete(tmp_path, manifest, dry_run=False)
+
+        assert report["removed_files"] == [".claude/hooks/gone.cjs"]
+        assert not (hooks / "gone.cjs").exists()
+        assert manifest["files"] == {}
+
+
+class TestExistingInstallDetection:
+    def test_manifest_marks_an_install(self, tmp_path):
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".claude" / ".manifest.json").write_text("{}", encoding="utf-8")
+        assert _has_existing_install(tmp_path)
+
+    def test_hooks_directory_marks_a_pre_manifest_install(self, tmp_path):
+        hooks = tmp_path / ".claude" / "hooks"
+        hooks.mkdir(parents=True)
+        (hooks / "bash-guard.cjs").write_text("//", encoding="utf-8")
+        assert _has_existing_install(tmp_path)
+
+    def test_empty_directory_is_a_fresh_project(self, tmp_path):
+        assert not _has_existing_install(tmp_path)
+
+    def test_init_on_an_existing_install_runs_cleanup(self, tmp_path, monkeypatch):
+        """`npx claude-protocol init` passes no --upgrade. Without this, the
+        project keeps hooks this version no longer ships, next to the new
+        ones."""
+        save_manifest(tmp_path, {"version": "3.5.0", "files": {}})
+        calls = []
+        monkeypatch.setattr(bootstrap, "cleanup_obsolete",
+                            lambda *a, **kw: calls.append(a) or {
+                                "removed_files": [], "removed_dirs": [],
+                                "stripped_settings_hooks": [],
+                                "stripped_local_patterns": [], "backups": [None]})
+        _stub_heavy_steps(monkeypatch)
+
+        monkeypatch.setattr(sys, "argv", ["bootstrap.py", "--project-dir", str(tmp_path)])
+        with pytest.raises(SystemExit) as exc:
+            bootstrap.main()
+
+        assert exc.value.code == 0
+        assert len(calls) == 1, "cleanup did not run on an existing install"
+
+    def test_fresh_project_does_not_run_cleanup(self, tmp_path, monkeypatch):
+        calls = []
+        monkeypatch.setattr(bootstrap, "cleanup_obsolete", lambda *a, **kw: calls.append(a))
+        _stub_heavy_steps(monkeypatch)
+
+        monkeypatch.setattr(sys, "argv", ["bootstrap.py", "--project-dir", str(tmp_path)])
+        with pytest.raises(SystemExit):
+            bootstrap.main()
+
+        assert calls == []
+
+
+class TestLanguageIsRemembered:
+    def _run(self, tmp_path, monkeypatch, argv):
+        seen = {}
+        monkeypatch.setattr(bootstrap, "copy_rules_and_skills",
+                            lambda pd, wr, lang, m, f: seen.setdefault("lang", lang) or [])
+        _stub_heavy_steps(monkeypatch)
+        monkeypatch.setattr(bootstrap, "copy_rules_and_skills",
+                            lambda pd, wr, lang, m, f: seen.setdefault("lang", lang) or [])
+        monkeypatch.setattr(sys, "argv", ["bootstrap.py", "--project-dir", str(tmp_path)] + argv)
+        with pytest.raises(SystemExit):
+            bootstrap.main()
+        return seen.get("lang")
+
+    def test_install_records_the_language(self, tmp_path, monkeypatch):
+        self._run(tmp_path, monkeypatch, ["--lang", "ru"])
+        assert load_manifest(tmp_path)["lang"] == "ru"
+
+    def test_upgrade_without_lang_keeps_the_installed_one(self, tmp_path, monkeypatch):
+        """A Russian project used to flip back to English on every upgrade."""
+        save_manifest(tmp_path, {"version": "3.5.0", "files": {}, "lang": "ru"})
+        assert self._run(tmp_path, monkeypatch, []) == "ru"
+
+    def test_explicit_lang_wins_over_the_manifest(self, tmp_path, monkeypatch):
+        save_manifest(tmp_path, {"version": "3.5.0", "files": {}, "lang": "ru"})
+        assert self._run(tmp_path, monkeypatch, ["--lang", "en"]) == "en"
+
+    def test_fresh_project_defaults_to_english(self, tmp_path, monkeypatch):
+        assert self._run(tmp_path, monkeypatch, []) == "en"
+
+
+class TestSettingsAndClaudeMdSafety:
+    def test_settings_json_is_backed_up_before_the_merge(self, tmp_path):
+        """The merge is the only write into a file the user owns."""
+        claude = tmp_path / ".claude"
+        claude.mkdir()
+        original = json.dumps({"hooks": {"PreToolUse": [
+            {"matcher": "Bash", "hooks": [
+                {"type": "command", "command": "node .claude/hooks/bash-guard.cjs"}]}]}},
+            indent=2)
+        (claude / "settings.json").write_text(original, encoding="utf-8")
+
+        copy_settings_and_claude_md(tmp_path, "Demo")
+
+        backup = claude / ".upgrades" / "settings.json.before-merge"
+        assert backup.exists()
+        assert backup.read_text(encoding="utf-8") == original
+        assert "CLAUDE_PROJECT_DIR" in (claude / "settings.json").read_text(encoding="utf-8")
+
+    def test_existing_claude_md_is_kept_and_template_offered(self, tmp_path):
+        """A CLAUDE.md a human has edited is never rewritten — but the current
+        template has to reach them somehow."""
+        mine = "# My project\n\n## Workflow\n\nbeads all the way\n"
+        (tmp_path / "CLAUDE.md").write_text(mine, encoding="utf-8")
+        (tmp_path / ".claude").mkdir()
+
+        copy_settings_and_claude_md(tmp_path, "Demo")
+
+        assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8") == mine
+        offered = tmp_path / ".claude" / ".upgrades" / "CLAUDE.md"
+        assert offered.exists()
+        assert "Demo" in offered.read_text(encoding="utf-8")

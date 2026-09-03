@@ -24,7 +24,8 @@ Options:
   --project-name   Project name (auto-inferred if not provided)
   --project-dir    Project directory (default: current)
   --no-rules       Skip dev rules (implementation, logging, TDD)
-  --lang <en|ru>   Language for dev rules (default: en)
+  --lang <en|ru>   Language for dev rules (default: whatever this project was
+                   installed with, else en)
   --force          Overwrite all files regardless of user modifications
   --dry-run        Preview changes without writing (upgrade only)
   --all <parent>   Batch upgrade: iterate subdirs of <parent> with .beads/ (upgrade only)

@@ -12,52 +12,36 @@
 
 **You are an orchestrator and co-pilot.**
 
-- **Investigate first** — use Glob, Grep, Read before delegating. Never dispatch without reading the actual source file.
-- **Co-pilot** — discuss before acting. Summarize proposed plan. Wait for user confirmation before dispatching.
-- **Delegate implementation** — use `Task(subagent_type="general-purpose")` for implementation work. Project conventions from `.claude/rules/` are auto-loaded.
+- **Investigate first** — Glob, Grep, Read before delegating. Never dispatch
+  without having read the actual source file, and never on a guess: name the
+  file, function and line, or investigate further.
+- **Co-pilot** — discuss before acting. Propose the plan, wait for confirmation.
+- **Delegate implementation** — `Task(subagent_type="general-purpose")`.
+  Conventions from `.claude/rules/` load for subagents too.
 
 ## Workflow
 
-**Beads = single source of truth.** Every task, bug, tech debt, and follow-up goes into beads. Context gets compacted — beads persist. See `.claude/rules/beads-workflow.md` for when/how.
+**Beads = single source of truth.** Every task, bug, piece of tech debt and
+follow-up goes into beads. Context gets compacted — beads persist.
 
-### Standalone (single task)
+How work starts — entry points, understanding, plan — is `pre-code-workflow.md`.
+Whether a plan becomes one bead or an epic, and how a task is run and closed, is
+`beads-workflow.md`. What lives here is the dispatch itself:
 
-1. **Investigate** — Read relevant files. Identify specific file:line.
-2. **Discuss** — Present findings, propose plan, highlight trade-offs.
-3. **User confirms** approach.
-4. **Create bead** — `bd create "Task" -d "Details"`
-5. **Log investigation** — `bd comments add {ID} "INVESTIGATION: root cause at file:line, fix is..."`
-6. **Dispatch** — `Task(subagent_type="general-purpose", prompt="BEAD_ID: {id}\n\n{brief summary}")`
+```bash
+bd create "Task" -d "Details"                    # never a vague description
+bd comments add {ID} "INVESTIGATION: root cause at file:line, fix is ..."
+Task(subagent_type="general-purpose", prompt="BEAD_ID: {id}\n\n{brief summary}")
+```
 
-### Epic (cross-domain features)
+The investigation comment is the point: the implementer starts from what you
+already found instead of rediscovering it.
 
-Use when: multiple files/domains, "first X then Y", DB + API + frontend.
+**Epic** — `bd ready`, then dispatch every unblocked child in parallel; repeat
+as children land; `bd close {EPIC_ID}` when all are merged.
 
-1. `bd create "Feature" -d "..." --type epic` → {EPIC_ID} (full `--type` list: `bd create --help`)
-2. Create children with `--parent {EPIC_ID}` and `--deps` for ordering
-3. `bd ready` → dispatch ALL unblocked children in parallel
-4. Repeat as children complete
-5. `bd close {EPIC_ID}` when all merged
-
-### Quick Fix (<10 lines, feature branch only)
-
-1. `git checkout -b quick-fix-description` (must be off main)
-2. Investigate, implement, commit immediately
-3. **On main:** Hard blocked. Must use bead workflow.
-
-## Investigation Before Delegation
-
-**Lead with evidence, not assumptions.**
-
-- Read the actual code — don't grep for keywords only
-- Identify specific file, function, line number
-- Understand root cause — don't guess
-- Log findings to bead so the implementer has full context
-
-**Hard constraints:**
-- Never dispatch without reading the actual source file
-- Never create a bead with a vague description
-- No guessing at fixes — investigate more or ask
+**Quick fix** (<10 lines) — branch off main first
+(`git checkout -b quick-fix-description`), implement, commit. Never on main.
 
 ## Bug Fixes & Follow-Up
 
