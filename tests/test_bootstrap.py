@@ -1,4 +1,4 @@
-"""Tests for bootstrap.py — project name inference, copy_and_replace, setup_gitignore, manifest."""
+"""Tests for bootstrap.py — project name inference, the installer, setup_gitignore, manifest."""
 
 import json
 import os
@@ -15,7 +15,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import bootstrap
 from bootstrap import (
     infer_project_name,
-    copy_and_replace,
     setup_gitignore,
     configure_beads_export,
     _from_package_json,
@@ -51,6 +50,24 @@ from bootstrap import (
     merge_hooks,
     TEMPLATES_DIR,
 )
+
+
+def _installer(project_dir, manifest=None, *, force=False, prompt=None,
+               dry_run=False):
+    """An Installer for a test that cares about one or two of its fields."""
+    return bootstrap.Installer(project_dir, manifest, force=force,
+                               prompt=prompt, dry_run=dry_run)
+
+
+def _claude_md(tmp_path, manifest, *, asks=None, dry_run=False):
+    """update_claude_md with the installer it now takes.
+
+    asks=True gives it a prompt that questions the user, asks=False one that
+    never does, and leaving asks out gives it no prompt at all.
+    """
+    prompt = None if asks is None else bootstrap.ConflictPrompt(interactive=asks)
+    update_claude_md(_template_text(),
+                     _installer(tmp_path, manifest, prompt=prompt, dry_run=dry_run))
 
 
 # ============================================================================
@@ -160,50 +177,6 @@ class TestFromGoMod:
     def test_extracts_last_segment(self, tmp_path):
         (tmp_path / "go.mod").write_text("module github.com/org/my-service\n")
         assert _from_go_mod(tmp_path) == "My Service"
-
-
-# ============================================================================
-# copy_and_replace
-# ============================================================================
-
-class TestCopyAndReplace:
-    def test_replaces_placeholder(self, tmp_path):
-        source = tmp_path / "template.md"
-        source.write_text("# [Project] Guide\n\nWelcome to [Project].")
-        dest = tmp_path / "output" / "guide.md"
-
-        copy_and_replace(source, dest, {"[Project]": "My App"})
-
-        result = dest.read_text()
-        assert result == "# My App Guide\n\nWelcome to My App."
-
-    def test_creates_parent_dirs(self, tmp_path):
-        source = tmp_path / "src.txt"
-        source.write_text("content")
-        dest = tmp_path / "a" / "b" / "c" / "file.txt"
-
-        copy_and_replace(source, dest, {})
-
-        assert dest.exists()
-        assert dest.read_text() == "content"
-
-    def test_multiple_replacements(self, tmp_path):
-        source = tmp_path / "tmpl.txt"
-        source.write_text("[Name] uses [Lang]")
-        dest = tmp_path / "out.txt"
-
-        copy_and_replace(source, dest, {"[Name]": "MyApp", "[Lang]": "Python"})
-
-        assert dest.read_text() == "MyApp uses Python"
-
-    def test_no_replacements(self, tmp_path):
-        source = tmp_path / "tmpl.txt"
-        source.write_text("unchanged content")
-        dest = tmp_path / "out.txt"
-
-        copy_and_replace(source, dest, {})
-
-        assert dest.read_text() == "unchanged content"
 
 
 # ============================================================================
@@ -1627,9 +1600,8 @@ class TestLanguageIsRemembered:
     def _run(self, tmp_path, monkeypatch, argv):
         seen = {}
 
-        def record_lang(project_dir, with_rules, lang, *args, **kwargs):
+        def record_lang(with_rules, lang, installer):
             seen.setdefault("lang", lang)
-            return []
 
         _stub_heavy_steps(monkeypatch)
         monkeypatch.setattr(bootstrap, "copy_rules_and_skills", record_lang)
@@ -1666,7 +1638,7 @@ class TestSettingsAndClaudeMdSafety:
             indent=2)
         (claude / "settings.json").write_text(original, encoding="utf-8")
 
-        copy_settings_and_claude_md(tmp_path, "Demo")
+        copy_settings_and_claude_md("Demo", _installer(tmp_path))
 
         backup = claude / ".upgrades" / "settings.json.before-merge"
         assert backup.exists()
@@ -1680,7 +1652,7 @@ class TestSettingsAndClaudeMdSafety:
         broken = b'{"hooks": {  <- someone was editing this\r\n'
         (claude / "settings.json").write_bytes(broken)
 
-        copy_settings_and_claude_md(tmp_path, "Demo")
+        copy_settings_and_claude_md("Demo", _installer(tmp_path))
 
         assert "CLAUDE_PROJECT_DIR" in read_verbatim(claude / "settings.json")
         kept = claude / ".upgrades" / "settings.json.before-merge"
@@ -1694,7 +1666,7 @@ class TestSettingsAndClaudeMdSafety:
         (tmp_path / "CLAUDE.md").write_text(mine, encoding="utf-8")
         (tmp_path / ".claude").mkdir()
 
-        copy_settings_and_claude_md(tmp_path, "Demo")
+        copy_settings_and_claude_md("Demo", _installer(tmp_path))
 
         assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8") == mine
         offered = tmp_path / ".claude" / ".upgrades" / "CLAUDE.md"
@@ -1727,9 +1699,11 @@ def _explode(_):
 
 
 def _copy_rules(tmp_path, manifest, *, force=False, prompt=None, dry_run=False):
-    """copy_rules_and_skills without seven positional arguments to miscount."""
-    return copy_rules_and_skills(tmp_path, True, "en", manifest, force,
-                                 prompt, dry_run)
+    """copy_rules_and_skills, and the installer it takes, in one call."""
+    installer = _installer(tmp_path, manifest, force=force, prompt=prompt,
+                           dry_run=dry_run)
+    copy_rules_and_skills(True, "en", installer)
+    return installer.skipped
 
 
 def _modified_rule(tmp_path, name="implementation-standard.md", text="mine\n"):
@@ -1814,42 +1788,134 @@ class TestConflictPromptDecides:
         assert not prompt.will_ask
 
 
-class TestNothingIsEverLost:
-    def test_keeping_yours_saves_ours_beside_it(self, tmp_path):
-        manifest = _modified_rule(tmp_path)
-        prompt = bootstrap.ConflictPrompt(interactive=False)
+# ==========================================================================
+# Nothing is ever lost, whichever kind of file it is
+# ==========================================================================
+# Agents, rules and the skill were three copies of the same eighteen lines, and
+# each grew its own test class around its own copy. They are one method now, so
+# what they promise is proved once, over all three — and a fourth kind of file
+# costs one line here instead of eighty.
 
-        skipped = _copy_rules(tmp_path, manifest, prompt=prompt)
+MINE = "MY OWN version, edited by hand\n"
 
-        rule = tmp_path / ".claude" / "rules" / "implementation-standard.md"
-        assert rule.read_text(encoding="utf-8") == "mine\n"
-        assert "rules/implementation-standard.md" in skipped
-        theirs = tmp_path / ".claude" / ".upgrades" / "rules" / "implementation-standard.md"
-        assert "IMPLEMENTATION STANDARD" in theirs.read_text(encoding="utf-8")
+MANAGED = {
+    "agent": "agents/code-reviewer.md",
+    "rule": "rules/implementation-standard.md",
+    "skill": "skills/project-discovery/SKILL.md",
+}
 
-    def test_taking_ours_saves_yours_beside_it(self, tmp_path, monkeypatch):
-        manifest = _modified_rule(tmp_path, text="my own standard\n")
-        prompt = bootstrap.ConflictPrompt(interactive=True)
-        monkeypatch.setattr("builtins.input", lambda _: "T")
 
-        skipped = _copy_rules(tmp_path, manifest, prompt=prompt)
+def _edited(tmp_path, kind):
+    """A project carrying one file of ours that its owner has since edited."""
+    rel_key = MANAGED[kind]
+    dest = tmp_path / ".claude" / rel_key
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    write_verbatim(dest, MINE)
+    return {"files": {rel_key: "sha256:something-else"}}
 
-        rule = tmp_path / ".claude" / "rules" / "implementation-standard.md"
-        assert "IMPLEMENTATION STANDARD" in rule.read_text(encoding="utf-8")
-        assert "rules/implementation-standard.md" not in skipped
-        mine = tmp_path / ".claude" / ".upgrades" / "rules" / "implementation-standard.md.mine"
-        assert mine.read_text(encoding="utf-8") == "my own standard\n"
 
-    def test_taking_ours_records_the_new_hash(self, tmp_path, monkeypatch):
+def _install_kind(tmp_path, kind, manifest, *, force=False, prompt=None,
+                  dry_run=False):
+    """Run the step that installs that kind of file. Returns the installer."""
+    installer = _installer(tmp_path, manifest, force=force, prompt=prompt,
+                           dry_run=dry_run)
+    if kind == "agent":
+        bootstrap.copy_agents("Demo", installer)
+    else:  # the rule and the skill both arrive through this one step
+        copy_rules_and_skills(True, "en", installer)
+    return installer
+
+
+def _answering(answer, monkeypatch):
+    """A prompt that a person answers with `answer`."""
+    monkeypatch.setattr("builtins.input", lambda _: answer)
+    return bootstrap.ConflictPrompt(interactive=True)
+
+
+@pytest.mark.parametrize("kind", list(MANAGED))
+class TestEveryManagedFileKeepsThePromise:
+    def test_an_edit_is_a_question(self, tmp_path, kind, monkeypatch):
+        manifest = _edited(tmp_path, kind)
+        asked = []
+        monkeypatch.setattr("builtins.input", lambda _: asked.append(1) or "k")
+
+        _install_kind(tmp_path, kind, manifest,
+                      prompt=bootstrap.ConflictPrompt(interactive=True))
+
+        assert asked, "a file the user edited was replaced without asking"
+        assert read_verbatim(tmp_path / ".claude" / MANAGED[kind]) == MINE
+
+    def test_keeping_yours_saves_ours_beside_it(self, tmp_path, kind, monkeypatch):
+        manifest = _edited(tmp_path, kind)
+
+        installer = _install_kind(tmp_path, kind, manifest,
+                                  prompt=_answering("k", monkeypatch))
+
+        rel_key = MANAGED[kind]
+        assert read_verbatim(tmp_path / ".claude" / rel_key) == MINE
+        assert rel_key in installer.skipped
+        assert (tmp_path / ".claude" / ".upgrades" / rel_key).exists()
+
+    def test_taking_ours_saves_yours_beside_it(self, tmp_path, kind, monkeypatch):
+        manifest = _edited(tmp_path, kind)
+
+        _install_kind(tmp_path, kind, manifest, prompt=_answering("t", monkeypatch))
+
+        rel_key = MANAGED[kind]
+        assert read_verbatim(tmp_path / ".claude" / rel_key) != MINE
+        mine = tmp_path / ".claude" / ".upgrades" / (rel_key + ".mine")
+        assert read_verbatim(mine) == MINE, "the copy is not byte-for-byte"
+
+    def test_taking_ours_records_the_new_hash(self, tmp_path, kind, monkeypatch):
         """Otherwise the same file is reported as modified on the next upgrade."""
-        manifest = _modified_rule(tmp_path)
-        prompt = bootstrap.ConflictPrompt(interactive=True)
-        monkeypatch.setattr("builtins.input", lambda _: "T")
+        manifest = _edited(tmp_path, kind)
 
-        _copy_rules(tmp_path, manifest, prompt=prompt)
+        _install_kind(tmp_path, kind, manifest, prompt=_answering("t", monkeypatch))
 
-        rule = tmp_path / ".claude" / "rules" / "implementation-standard.md"
-        assert manifest["files"]["rules/implementation-standard.md"] == file_sha256(rule)
+        rel_key = MANAGED[kind]
+        dest = tmp_path / ".claude" / rel_key
+        assert manifest["files"][rel_key] == file_sha256(dest)
+
+    def test_no_terminal_keeps_yours(self, tmp_path, kind, monkeypatch):
+        """Batch upgrades, CI and agent-driven runs must not block on input."""
+        monkeypatch.setattr("builtins.input", _explode)
+        manifest = _edited(tmp_path, kind)
+
+        _install_kind(tmp_path, kind, manifest,
+                      prompt=bootstrap.ConflictPrompt(interactive=False))
+
+        assert read_verbatim(tmp_path / ".claude" / MANAGED[kind]) == MINE
+
+    def test_force_replaces_it_and_keeps_a_copy(self, tmp_path, kind):
+        """should_update_file answers "forced" without ever looking at the file."""
+        manifest = _edited(tmp_path, kind)
+
+        _install_kind(tmp_path, kind, manifest, force=True)
+
+        rel_key = MANAGED[kind]
+        assert read_verbatim(tmp_path / ".claude" / rel_key) != MINE
+        mine = tmp_path / ".claude" / ".upgrades" / (rel_key + ".mine")
+        assert read_verbatim(mine) == MINE, "the copy is not byte-for-byte"
+
+    def test_a_preview_with_force_writes_nothing(self, tmp_path, kind):
+        manifest = _edited(tmp_path, kind)
+        before = _snapshot(tmp_path)
+
+        _install_kind(tmp_path, kind, manifest, force=True, dry_run=True)
+
+        assert _snapshot(tmp_path) == before
+        assert not (tmp_path / ".claude" / ".upgrades").exists()
+
+    def test_an_untouched_file_is_updated_silently(self, tmp_path, kind, monkeypatch):
+        monkeypatch.setattr("builtins.input", _explode)
+        manifest = {"files": {}}
+
+        _install_kind(tmp_path, kind, manifest)
+
+        rel_key = MANAGED[kind]
+        dest = tmp_path / ".claude" / rel_key
+        assert dest.exists()
+        assert manifest["files"][rel_key] == file_sha256(dest)
 
 
 class TestPromptWiring:
@@ -1857,10 +1923,8 @@ class TestPromptWiring:
         asked = []
         monkeypatch.setattr(bootstrap, "_stdin_is_a_person", lambda: isatty)
 
-        def record_prompt(project_dir, with_rules, lang, manifest, force,
-                          prompt=None, *args, **kwargs):
-            asked.append(prompt.will_ask)
-            return []
+        def record_prompt(with_rules, lang, installer):
+            asked.append(installer.prompt.will_ask)
 
         _stub_heavy_steps(monkeypatch)
         monkeypatch.setattr(bootstrap, "copy_rules_and_skills", record_prompt)
@@ -2083,7 +2147,7 @@ class TestClaudeMdBlockIsRefreshed:
     def test_a_new_file_gets_the_markers_and_is_recorded(self, tmp_path):
         manifest = {"files": {}}
 
-        update_claude_md(tmp_path, _template_text(), manifest)
+        _claude_md(tmp_path, manifest)
 
         assert marked_span(read_verbatim(tmp_path / "CLAUDE.md")) is not None
         assert manifest["regions"]["CLAUDE.md"] == content_sha256(_template_region())
@@ -2092,8 +2156,7 @@ class TestClaudeMdBlockIsRefreshed:
         manifest = _installed_project(tmp_path)
         monkeypatch.setattr("builtins.input", _explode)
 
-        update_claude_md(tmp_path, _template_text(), manifest,
-                         bootstrap.ConflictPrompt(interactive=True))
+        _claude_md(tmp_path, manifest, asks=True)
 
         text = read_verbatim(tmp_path / "CLAUDE.md")
         assert "what 3.7 shipped" not in text
@@ -2103,7 +2166,7 @@ class TestClaudeMdBlockIsRefreshed:
     def test_the_users_own_text_is_left_alone(self, tmp_path):
         manifest = _installed_project(tmp_path)
 
-        update_claude_md(tmp_path, _template_text(), manifest)
+        _claude_md(tmp_path, manifest)
 
         text = read_verbatim(tmp_path / "CLAUDE.md")
         assert text.startswith("# Demo\n\n## Project Overview\n\nWe sell widgets.\n\n")
@@ -2114,7 +2177,7 @@ class TestClaudeMdBlockIsRefreshed:
         path = tmp_path / "CLAUDE.md"
         write_verbatim(path, read_verbatim(path).replace("\n", "\r\n"))
 
-        update_claude_md(tmp_path, _template_text(), manifest)
+        _claude_md(tmp_path, manifest)
 
         text = read_verbatim(path)
         assert "**You are an orchestrator and co-pilot.**" in text
@@ -2124,7 +2187,7 @@ class TestClaudeMdBlockIsRefreshed:
         write_verbatim(tmp_path / "CLAUDE.md", "# Demo\n\n## Build\n\nmake all\n")
         manifest = {"files": {}}
 
-        update_claude_md(tmp_path, _template_text(), manifest)
+        _claude_md(tmp_path, manifest)
 
         text = read_verbatim(tmp_path / "CLAUDE.md")
         assert "## Build" in text and "# Beads Orchestration" in text
@@ -2151,8 +2214,7 @@ class TestClaudeMdAsksBeforeTouchingYourEdits:
         asked = []
         monkeypatch.setattr("builtins.input", lambda _: asked.append(1) or "k")
 
-        update_claude_md(tmp_path, _template_text(), manifest,
-                         bootstrap.ConflictPrompt(interactive=True))
+        _claude_md(tmp_path, manifest, asks=True)
 
         assert asked, "an edited block was replaced without asking"
         assert "plus a rule I added" in read_verbatim(tmp_path / "CLAUDE.md")
@@ -2161,8 +2223,7 @@ class TestClaudeMdAsksBeforeTouchingYourEdits:
         manifest = self._edited_inside(tmp_path)
         monkeypatch.setattr("builtins.input", lambda _: "k")
 
-        update_claude_md(tmp_path, _template_text(), manifest,
-                         bootstrap.ConflictPrompt(interactive=True))
+        _claude_md(tmp_path, manifest, asks=True)
 
         ours = read_verbatim(tmp_path / ".claude" / ".upgrades" / "CLAUDE.md")
         assert "**You are an orchestrator and co-pilot.**" in ours
@@ -2172,8 +2233,7 @@ class TestClaudeMdAsksBeforeTouchingYourEdits:
         manifest = self._edited_inside(tmp_path)
         monkeypatch.setattr("builtins.input", lambda _: "t")
 
-        update_claude_md(tmp_path, _template_text(), manifest,
-                         bootstrap.ConflictPrompt(interactive=True))
+        _claude_md(tmp_path, manifest, asks=True)
 
         text = read_verbatim(tmp_path / "CLAUDE.md")
         assert "plus a rule I added" not in text
@@ -2186,8 +2246,7 @@ class TestClaudeMdAsksBeforeTouchingYourEdits:
         manifest = self._legacy(tmp_path)
         monkeypatch.setattr("builtins.input", lambda _: "t")
 
-        update_claude_md(tmp_path, _template_text(), manifest,
-                         bootstrap.ConflictPrompt(interactive=True))
+        _claude_md(tmp_path, manifest, asks=True)
 
         text = read_verbatim(tmp_path / "CLAUDE.md")
         assert marked_span(text) is not None
@@ -2199,8 +2258,7 @@ class TestClaudeMdAsksBeforeTouchingYourEdits:
         manifest = self._legacy(tmp_path)
         monkeypatch.setattr("builtins.input", lambda _: "k")
 
-        update_claude_md(tmp_path, _template_text(), manifest,
-                         bootstrap.ConflictPrompt(interactive=True))
+        _claude_md(tmp_path, manifest, asks=True)
 
         assert read_verbatim(tmp_path / "CLAUDE.md") == LEGACY_CLAUDE_MD
         assert (tmp_path / ".claude" / ".upgrades" / "CLAUDE.md").exists()
@@ -2209,8 +2267,7 @@ class TestClaudeMdAsksBeforeTouchingYourEdits:
         manifest = self._legacy(tmp_path)
         monkeypatch.setattr("builtins.input", _explode)
 
-        update_claude_md(tmp_path, _template_text(), manifest,
-                         bootstrap.ConflictPrompt(interactive=False))
+        _claude_md(tmp_path, manifest, asks=False)
 
         assert read_verbatim(tmp_path / "CLAUDE.md") == LEGACY_CLAUDE_MD
 
@@ -2226,8 +2283,7 @@ class TestClaudeMdAsksBeforeTouchingYourEdits:
         asked = []
         monkeypatch.setattr("builtins.input", lambda _: asked.append(1) or "k")
 
-        update_claude_md(tmp_path, _template_text(), manifest,
-                         bootstrap.ConflictPrompt(interactive=True))
+        _claude_md(tmp_path, manifest, asks=True)
 
         assert asked, "replaced a block we have no record of installing"
         assert "what 3.7 shipped" in read_verbatim(tmp_path / "CLAUDE.md")
@@ -2241,8 +2297,7 @@ class TestClaudeMdAsksBeforeTouchingYourEdits:
         (tmp_path / ".claude").mkdir(exist_ok=True)
         monkeypatch.setattr("builtins.input", _explode)
 
-        update_claude_md(tmp_path, _template_text(), {"files": {}},
-                         bootstrap.ConflictPrompt(interactive=False))
+        _claude_md(tmp_path, {"files": {}}, asks=False)
 
         text = read_verbatim(tmp_path / "CLAUDE.md")
         assert "runs to <!-- claude-protocol:end -->, and nothing else moves." in text
@@ -2297,31 +2352,12 @@ class TestClaudeMdAsksBeforeTouchingYourEdits:
 # should_update_file answers "forced" before the conflict prompt is ever
 # reached, so under --force nothing saved the user's version and an edited rule
 # was simply gone. Everywhere else in the upgrade the losing version survives.
+# That --force keeps a copy is proved for every kind of file above; what is left
+# here is the awkward company it keeps — an untouched file, a manifest someone
+# hand-edited, a path we cannot read.
 
 
 class TestForceKeepsWhatItOverwrites:
-    def test_an_edited_rule_is_recoverable(self, tmp_path):
-        manifest = _modified_rule(tmp_path, text="my own standard\n")
-        rule = tmp_path / ".claude" / "rules" / "implementation-standard.md"
-        before = read_verbatim(rule)
-
-        _copy_rules(tmp_path, manifest, force=True, dry_run=False)
-
-        assert "IMPLEMENTATION STANDARD" in read_verbatim(rule)
-        mine = tmp_path / ".claude" / ".upgrades" / "rules" / "implementation-standard.md.mine"
-        assert read_verbatim(mine) == before, "the copy is not byte-for-byte"
-
-    def test_an_edited_agent_is_recoverable(self, tmp_path):
-        agents = tmp_path / ".claude" / "agents"
-        agents.mkdir(parents=True)
-        write_verbatim(agents / "code-reviewer.md", "my own reviewer\n")
-        manifest = {"files": {"agents/code-reviewer.md": "sha256:something-else"}}
-
-        bootstrap.copy_agents(tmp_path, "Demo", manifest, True, None, False)
-
-        mine = tmp_path / ".claude" / ".upgrades" / "agents" / "code-reviewer.md.mine"
-        assert read_verbatim(mine) == "my own reviewer\n"
-
     def test_a_file_you_never_touched_leaves_no_copy(self, tmp_path, monkeypatch):
         """A .mine for every untouched file would bury the ones that matter."""
         _stub_external(monkeypatch)
@@ -2337,13 +2373,6 @@ class TestForceKeepsWhatItOverwrites:
 
         upgrades = tmp_path / ".claude" / ".upgrades"
         assert not list(upgrades.rglob("*.mine"))
-
-    def test_a_preview_with_force_still_writes_nothing(self, tmp_path):
-        manifest = _modified_rule(tmp_path, text="my own standard\n")
-
-        _copy_rules(tmp_path, manifest, force=True, dry_run=True)
-
-        assert not (tmp_path / ".claude" / ".upgrades").exists()
 
     def test_a_hand_broken_manifest_does_not_crash_the_run(self, tmp_path, monkeypatch):
         """A hand-edited .manifest.json can carry "files": null."""
@@ -2370,16 +2399,16 @@ class TestForceKeepsWhatItOverwrites:
         dest = tmp_path / "rules" / "x.md"
         dest.mkdir(parents=True)
 
-        assert bootstrap._preserve_before_force(
-            tmp_path, "rules/x.md", dest, {"files": {}}, False) is False
+        assert _installer(tmp_path).keep_theirs("rules/x.md", dest) is False
 
 
 # ============================================================================
 # The project-discovery skill is a prompt, not enforcement code
 # ============================================================================
 # It used to be rmtree + copytree, "always overwrite — our code". SKILL.md is
-# text people tune the way they tune a rule, and anything they kept beside it
-# was deleted with no copy, on a plain run with no flags.
+# text people tune the way they tune a rule, and it is now asked about exactly
+# like one, above. What only a directory can do is carry a file we never
+# shipped — and that file was deleted with no copy, on a plain run, no flags.
 
 
 SKILL_KEY = "skills/project-discovery/SKILL.md"
@@ -2403,75 +2432,6 @@ class TestSkillIsNotBulldozed:
         notes = tmp_path / ".claude" / "skills" / "project-discovery" / "our-notes.md"
         assert notes.exists(), "a file we never shipped was deleted"
         assert read_verbatim(notes) == "notes I keep here\n"
-
-    def test_an_edited_skill_is_a_question(self, tmp_path, monkeypatch):
-        manifest = _installed_skill(tmp_path)
-        asked = []
-        monkeypatch.setattr("builtins.input", lambda _: asked.append(1) or "k")
-
-        skipped = _copy_rules(tmp_path, manifest, force=False,
-                    prompt=bootstrap.ConflictPrompt(interactive=True),
-                    dry_run=False)
-
-        assert asked, "an edited SKILL.md was replaced without asking"
-        skill = tmp_path / ".claude" / "skills" / "project-discovery" / "SKILL.md"
-        assert read_verbatim(skill) == "MY OWN discovery prompt\n"
-        assert SKILL_KEY in skipped
-        assert (tmp_path / ".claude" / ".upgrades" / SKILL_KEY).exists()
-
-    def test_taking_ours_saves_yours(self, tmp_path, monkeypatch):
-        manifest = _installed_skill(tmp_path)
-        monkeypatch.setattr("builtins.input", lambda _: "t")
-
-        _copy_rules(tmp_path, manifest, force=False,
-                    prompt=bootstrap.ConflictPrompt(interactive=True),
-                    dry_run=False)
-
-        skill = tmp_path / ".claude" / "skills" / "project-discovery" / "SKILL.md"
-        assert "MY OWN" not in read_verbatim(skill)
-        mine = tmp_path / ".claude" / ".upgrades" / (SKILL_KEY + ".mine")
-        assert read_verbatim(mine) == "MY OWN discovery prompt\n"
-
-    def test_no_terminal_keeps_your_version(self, tmp_path, monkeypatch):
-        manifest = _installed_skill(tmp_path)
-        monkeypatch.setattr("builtins.input", _explode)
-
-        _copy_rules(tmp_path, manifest, force=False,
-                    prompt=bootstrap.ConflictPrompt(interactive=False),
-                    dry_run=False)
-
-        skill = tmp_path / ".claude" / "skills" / "project-discovery" / "SKILL.md"
-        assert read_verbatim(skill) == "MY OWN discovery prompt\n"
-
-    def test_force_replaces_it_and_keeps_a_copy(self, tmp_path):
-        manifest = _installed_skill(tmp_path)
-
-        _copy_rules(tmp_path, manifest, force=True, dry_run=False)
-
-        skill = tmp_path / ".claude" / "skills" / "project-discovery" / "SKILL.md"
-        assert "MY OWN" not in read_verbatim(skill)
-        mine = tmp_path / ".claude" / ".upgrades" / (SKILL_KEY + ".mine")
-        assert read_verbatim(mine) == "MY OWN discovery prompt\n"
-
-    def test_a_preview_writes_nothing(self, tmp_path):
-        manifest = _installed_skill(tmp_path)
-        before = read_verbatim(tmp_path / ".claude" / "skills" / "project-discovery" / "SKILL.md")
-
-        _copy_rules(tmp_path, manifest, force=True, dry_run=True)
-
-        skill = tmp_path / ".claude" / "skills" / "project-discovery" / "SKILL.md"
-        assert read_verbatim(skill) == before
-        assert not (tmp_path / ".claude" / ".upgrades").exists()
-
-    def test_an_untouched_skill_is_updated_silently(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("builtins.input", _explode)
-        manifest = {"files": {}}
-
-        _copy_rules(tmp_path, manifest, force=False, dry_run=False)
-
-        skill = tmp_path / ".claude" / "skills" / "project-discovery" / "SKILL.md"
-        assert skill.exists()
-        assert manifest["files"][SKILL_KEY] == file_sha256(skill)
 
 
 # ============================================================================
@@ -2625,10 +2585,8 @@ class TestBatchUpgradeDoesNotAsk:
         monkeypatch.setattr(bootstrap, "_stdin_is_a_person", lambda: True)
         _stub_heavy_steps(monkeypatch)
 
-        def record(project_dir, with_rules, lang, manifest, force_, prompt=None,
-                   *args, **kwargs):
-            prompts.append(prompt)
-            return []
+        def record(with_rules, lang, installer):
+            prompts.append(installer.prompt)
 
         monkeypatch.setattr(bootstrap, "copy_rules_and_skills", record)
         bootstrap.run_batch_upgrade(tmp_path, True, "en", force, False)
@@ -2681,8 +2639,7 @@ class TestClaudeMdDryRunWritesNothing:
         monkeypatch.setattr("builtins.input", _explode)
         before = _snapshot(tmp_path)
 
-        update_claude_md(tmp_path, _template_text(), manifest,
-                         bootstrap.ConflictPrompt(interactive=False), dry_run=True)
+        _claude_md(tmp_path, manifest, asks=False, dry_run=True)
 
         after = _snapshot(tmp_path)
         assert after == before
