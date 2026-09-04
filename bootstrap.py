@@ -343,14 +343,6 @@ def _from_go_mod(project_dir: Path) -> str | None:
 # HELPERS
 # ============================================================================
 
-def copy_and_replace(source: Path, dest: Path, replacements: dict) -> None:
-    content = source.read_text(encoding='utf-8')
-    for placeholder, value in replacements.items():
-        content = content.replace(placeholder, value)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(content, encoding='utf-8')
-
-
 def read_verbatim(path: Path) -> str:
     """Read a text file without translating its line endings.
 
@@ -588,28 +580,6 @@ class ConflictPrompt:
             print(f"  ... {len(diff) - self._DIFF_LINES} more lines")
 
 
-def _preserve_before_force(project_dir: Path, rel_key: str, dest: Path,
-                           manifest: dict, dry_run: bool) -> bool:
-    """--force keeps what it overwrites too. True when a copy was made.
-
-    should_update_file answers "forced" before the conflict prompt is ever
-    reached, so this is the only place a --force run can save the user's
-    version — and without it an edited rule was simply gone. A file that still
-    matches the manifest is ours, and a copy of it would only bury the ones
-    that matter.
-    """
-    if dry_run or not dest.exists():
-        return False
-    try:
-        raw = dest.read_bytes()
-        if content_sha256_bytes(raw) == manifest.get("files", {}).get(rel_key):
-            return False
-        save_replaced_version(project_dir, rel_key, raw.decode("utf-8"))
-    except Exception:
-        return False  # unreadable file: overwriting is still what --force means
-    return True
-
-
 def _dry(dry_run: bool) -> str:
     """Prefix for a line describing a write that a dry run did not make."""
     return "[DRY-RUN] " if dry_run else ""
@@ -623,28 +593,92 @@ def _stdin_is_a_person() -> bool:
         return False
 
 
-def _resolve_modified(prompt, project_dir: Path, rel_key: str, dest: Path,
-                      new_text: str, *, wording: PromptWording = None,
-                      dry_run: bool = False) -> bool:
-    """Ask (or apply the standing answer). True → write ours over theirs.
+class Installer:
+    """What one run knows, and the one way a file we ship reaches its place.
 
-    Whichever way it goes, the version that loses is preserved under
-    .claude/.upgrades/ — an upgrade never destroys text a person wrote. Except
-    in a dry run: saving the loser is itself a write, and a preview writes
-    nothing at all.
+    Agents, rules and the skill each used to spell the same sequence out in
+    full — ask should_update_file, put a conflict to the user, save whatever is
+    about to be lost, write, record the hash, print. Four copies of eighteen
+    lines, and by the time this replaced them two had already drifted from the
+    other two. A fifth kind of file is now four lines, not a fifth copy.
     """
-    if prompt is None:
-        prompt = ConflictPrompt(interactive=False)
-    if prompt.ask(rel_key, dest, new_text, wording) == ConflictPrompt.TAKE:
-        if not dry_run:
-            try:
-                save_replaced_version(project_dir, rel_key, read_verbatim(dest))
-            except Exception:
-                pass  # unreadable file: taking ours is still the user's choice
+
+    def __init__(self, project_dir: Path, manifest: dict = None, *,
+                 force: bool = False, prompt=None, dry_run: bool = False):
+        self.project_dir = project_dir
+        self.manifest = manifest if manifest is not None else {}
+        if not isinstance(self.manifest.get("files"), dict):
+            self.manifest["files"] = {}
+        self.force = force
+        self.prompt = prompt
+        self.dry_run = dry_run
+        self.skipped = []
+
+    def path(self, rel_key: str) -> Path:
+        """Where a manifest key lives. One rule for both, so a file and the
+        hash recorded for it can never end up describing different places."""
+        return self.project_dir / ".claude" / rel_key
+
+    def install(self, rel_key: str, text: str, *,
+                label: str = None, note: str = "") -> None:
+        """Install one file we ship, or keep the one the project already has.
+
+        What was kept instead of installed lands in self.skipped, and the run's
+        closing report reads it from there.
+        """
+        dest = self.path(rel_key)
+        label = label or rel_key
+        ok, reason = should_update_file(dest, rel_key, self.manifest, self.force)
+        if not ok:
+            ok = self.resolve(rel_key, dest, text)
+            reason = "replaced on request" if ok else reason
+        if not ok:
+            self.skipped.append(rel_key)
+            print(f"  - {label} (yours kept)")
+            print(f"    {_dry(self.dry_run)}Ours saved to: .claude/.upgrades/{rel_key}")
+            return
+        if self.keep_theirs(rel_key, dest):
+            print(f"    Yours saved to: .claude/.upgrades/{rel_key}.mine")
+        if not self.dry_run:
+            write_verbatim(dest, text)
+            self.manifest["files"][rel_key] = file_sha256(dest)
+        print(f"  - {_dry(self.dry_run)}{label}{note}"
+              + (f" ({reason})" if reason != "new" else ""))
+
+    def resolve(self, rel_key: str, dest: Path, new_text: str,
+                wording: PromptWording = None) -> bool:
+        """Ask (or apply the standing answer). True → write ours over theirs.
+
+        Whichever way it goes, the version that loses is preserved under
+        .claude/.upgrades/ — ours here, theirs in keep_theirs. Except in a dry
+        run: saving the loser is itself a write, and a preview writes nothing.
+        """
+        prompt = self.prompt or ConflictPrompt(interactive=False)
+        if prompt.ask(rel_key, dest, new_text, wording) == ConflictPrompt.TAKE:
+            return True
+        if not self.dry_run:
+            save_upgrade(self.project_dir, rel_key, new_text)
+        return False
+
+    def keep_theirs(self, rel_key: str, dest: Path) -> bool:
+        """Save what we are about to overwrite. True when a copy was made.
+
+        Only what is not already ours: a file still matching the manifest is
+        our own last version, and copies of those would bury the ones that
+        matter. This is also the only place a --force run can save the user's
+        work, because should_update_file answers "forced" without ever looking
+        at the file.
+        """
+        if self.dry_run or not dest.exists():
+            return False
+        try:
+            raw = dest.read_bytes()
+            if content_sha256_bytes(raw) == self.manifest["files"].get(rel_key):
+                return False
+            save_replaced_version(self.project_dir, rel_key, raw.decode("utf-8"))
+        except Exception:
+            return False  # unreadable file: overwriting is still what was asked
         return True
-    if not dry_run:
-        save_upgrade(project_dir, rel_key, new_text)
-    return False
 
 
 # ============================================================================
@@ -1095,73 +1129,39 @@ def configure_beads_export(project_dir: Path) -> bool:
     return True
 
 
-def copy_agents(
-    project_dir: Path, project_name: str,
-    manifest: dict, force: bool = False, prompt=None, dry_run: bool = False,
-) -> list:
+def copy_agents(project_name: str, installer: Installer) -> None:
     """Copy code-reviewer and merge-supervisor templates."""
     print("\n[2/6] Copying agents...")
-    agents_dir = project_dir / ".claude" / "agents"
-    if not dry_run:
-        agents_dir.mkdir(parents=True, exist_ok=True)
-    skipped = []
-
-    replacements = {"[Project]": project_name}
-    for agent_file in (TEMPLATES_DIR / "agents").glob("*.md"):
-        dest = agents_dir / agent_file.name
-        rel_key = f"agents/{agent_file.name}"
-        ok, reason = should_update_file(dest, rel_key, manifest, force)
-        new_content = read_verbatim(agent_file)
-        for placeholder, value in replacements.items():
-            new_content = new_content.replace(placeholder, value)
-        if not ok:
-            ok = _resolve_modified(prompt, project_dir, rel_key, dest, new_content,
-                                   dry_run=dry_run)
-            reason = "replaced on request" if ok else reason
-        if ok:
-            if reason == "forced" and _preserve_before_force(
-                    project_dir, rel_key, dest, manifest, dry_run):
-                print(f"    yours saved to: .claude/.upgrades/{rel_key}.mine")
-            if not dry_run:
-                copy_and_replace(agent_file, dest, replacements)
-                manifest["files"][rel_key] = file_sha256(dest)
-            print(f"  - {_dry(dry_run)}{agent_file.name}"
-                  + (f" ({reason})" if reason != "new" else ""))
-        else:
-            skipped.append(rel_key)
-            print(f"  - {agent_file.name} (yours kept)")
-            print(f"    {_dry(dry_run)}Ours saved to: .claude/.upgrades/{rel_key}")
+    for src in sorted((TEMPLATES_DIR / "agents").glob("*.md")):
+        text = read_verbatim(src).replace("[Project]", project_name)
+        installer.install(f"agents/{src.name}", text, label=src.name)
     print("  DONE")
-    return skipped
 
 
-def copy_hooks(project_dir: Path, manifest: dict, dry_run: bool = False) -> None:
-    """Copy Node.js hooks (always overwrite — enforcement code)."""
+def copy_hooks(installer: Installer) -> None:
+    """Copy Node.js hooks (always overwrite — enforcement code).
+
+    The one kind of file that is never a question: hooks are enforcement code,
+    not text anyone is meant to tune, so this stays outside Installer.install.
+    """
     print("\n[3/6] Copying hooks...")
-    hooks_dir = project_dir / ".claude" / "hooks"
-    if not dry_run:
+    hooks_dir = installer.project_dir / ".claude" / "hooks"
+    if not installer.dry_run:
         hooks_dir.mkdir(parents=True, exist_ok=True)
 
     for hook_file in (TEMPLATES_DIR / "hooks").glob("*.cjs"):
         dest = hooks_dir / hook_file.name
-        if not dry_run:
+        if not installer.dry_run:
             shutil.copy2(hook_file, dest)
-            manifest["files"][f"hooks/{hook_file.name}"] = file_sha256(dest)
-        print(f"  - {_dry(dry_run)}{hook_file.name}")
+            installer.manifest["files"][f"hooks/{hook_file.name}"] = file_sha256(dest)
+        print(f"  - {_dry(installer.dry_run)}{hook_file.name}")
     print("  DONE")
 
 
-def copy_rules_and_skills(
-    project_dir: Path, with_rules: bool, lang: str = "en",
-    manifest: dict = None, force: bool = False, prompt=None,
-    dry_run: bool = False,
-) -> list:
+def copy_rules_and_skills(with_rules: bool, lang: str,
+                          installer: Installer) -> None:
     """Copy beads-workflow rule, project-discovery skill, and optional dev rules."""
     print("\n[4/6] Copying rules and skills...")
-    rules_dir = project_dir / ".claude" / "rules"
-    if not dry_run:
-        rules_dir.mkdir(parents=True, exist_ok=True)
-    skipped = []
 
     # Determine source directory based on language
     rules_src_dir = TEMPLATES_DIR / ("rules-ru" if lang == "ru" else "rules")
@@ -1174,62 +1174,21 @@ def copy_rules_and_skills(
     if not beads_src.exists():
         beads_src = TEMPLATES_DIR / "rules" / "beads-workflow.md"
     if beads_src.exists():
-        dest = rules_dir / "beads-workflow.md"
-        rel_key = "rules/beads-workflow.md"
-        ok, reason = should_update_file(dest, rel_key, manifest, force)
-        if not ok:
-            ok = _resolve_modified(prompt, project_dir, rel_key, dest,
-                                   read_verbatim(beads_src), dry_run=dry_run)
-            reason = "replaced on request" if ok else reason
-        if ok:
-            if reason == "forced" and _preserve_before_force(
-                    project_dir, rel_key, dest, manifest, dry_run):
-                print(f"    yours saved to: .claude/.upgrades/{rel_key}.mine")
-            if not dry_run:
-                shutil.copy2(beads_src, dest)
-                manifest["files"][rel_key] = file_sha256(dest)
-            print(f"  - {_dry(dry_run)}rules/beads-workflow.md"
-                  + (f" ({reason})" if reason != "new" else ""))
-        else:
-            skipped.append(rel_key)
-            print(f"  - rules/beads-workflow.md (yours kept)")
-            print(f"    {_dry(dry_run)}Ours saved to: .claude/.upgrades/{rel_key}")
+        installer.install("rules/beads-workflow.md", read_verbatim(beads_src))
 
     # Optional dev rules (from language-specific directory)
     if with_rules:
-        for rule_file in rules_src_dir.glob("*.md"):
-            if rule_file.name != "beads-workflow.md":
-                dest = rules_dir / rule_file.name
-                rel_key = f"rules/{rule_file.name}"
-                ok, reason = should_update_file(dest, rel_key, manifest, force)
-                if not ok:
-                    ok = _resolve_modified(prompt, project_dir, rel_key, dest,
-                                           read_verbatim(rule_file),
-                                           dry_run=dry_run)
-                    reason = "replaced on request" if ok else reason
-                if ok:
-                    if reason == "forced" and _preserve_before_force(
-                            project_dir, rel_key, dest, manifest, dry_run):
-                        print(f"    yours saved to: .claude/.upgrades/{rel_key}.mine")
-                    if not dry_run:
-                        shutil.copy2(rule_file, dest)
-                        manifest["files"][rel_key] = file_sha256(dest)
-                    suffix = f" ({lang})" if lang != "en" else ""
-                    suffix += f" ({reason})" if reason != "new" else ""
-                    print(f"  - {_dry(dry_run)}rules/{rule_file.name}{suffix}")
-                else:
-                    skipped.append(rel_key)
-                    print(f"  - rules/{rule_file.name} (yours kept)")
-                    print(f"    {_dry(dry_run)}Ours saved to: .claude/.upgrades/{rel_key}")
+        note = f" ({lang})" if lang != "en" else ""
+        for src in sorted(rules_src_dir.glob("*.md")):
+            if src.name != "beads-workflow.md":
+                installer.install(f"rules/{src.name}", read_verbatim(src),
+                                  note=note)
 
-    skipped += copy_skill(project_dir, manifest, force, prompt, dry_run)
-
+    copy_skill(installer)
     print("  DONE")
-    return skipped
 
 
-def copy_skill(project_dir: Path, manifest: dict, force: bool = False,
-               prompt=None, dry_run: bool = False) -> list:
+def copy_skill(installer: Installer) -> None:
     """Copy the project-discovery skill, one file at a time.
 
     It used to be rmtree + copytree, on the grounds that the directory is our
@@ -1240,32 +1199,10 @@ def copy_skill(project_dir: Path, manifest: dict, force: bool = False,
     """
     skill_src = TEMPLATES_DIR / "skills" / "project-discovery"
     if not skill_src.exists():
-        return []
-    skipped = []
+        return
     for src in sorted(p for p in skill_src.rglob("*") if p.is_file()):
         rel = str(src.relative_to(skill_src)).replace("\\", "/")
-        rel_key = f"skills/project-discovery/{rel}"
-        dest = project_dir / ".claude" / rel_key
-        ok, reason = should_update_file(dest, rel_key, manifest, force)
-        if not ok:
-            ok = _resolve_modified(prompt, project_dir, rel_key, dest,
-                                   read_verbatim(src), dry_run=dry_run)
-            reason = "replaced on request" if ok else reason
-        if ok:
-            if reason == "forced" and _preserve_before_force(
-                    project_dir, rel_key, dest, manifest, dry_run):
-                print(f"    yours saved to: .claude/.upgrades/{rel_key}.mine")
-            if not dry_run:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dest)
-                manifest["files"][rel_key] = file_sha256(dest)
-            print(f"  - {_dry(dry_run)}{rel_key}"
-                  + (f" ({reason})" if reason != "new" else ""))
-        else:
-            skipped.append(rel_key)
-            print(f"  - {rel_key} (yours kept)")
-            print(f"    {_dry(dry_run)}Ours saved to: .claude/.upgrades/{rel_key}")
-    return skipped
+        installer.install(f"skills/project-discovery/{rel}", read_verbatim(src))
 
 
 # ============================================================================
@@ -1385,55 +1322,62 @@ def _claude_md_plan(current: str, region: str, manifest: dict):
     return ClaudeMdPlan(current.rstrip("\r\n") + addition, "our block appended", None)
 
 
-def _write_claude_md(dest: Path, text: str, region: str, manifest: dict,
-                     dry_run: bool) -> None:
+def _write_claude_md(installer: Installer, text: str, region: str) -> None:
     """Write the file and remember the block, so the next upgrade knows it is ours."""
-    if dry_run:
+    if installer.dry_run:
         return
-    write_verbatim(dest, text)
+    write_verbatim(installer.project_dir / "CLAUDE.md", text)
     if region is not None:
-        manifest.setdefault("regions", {})["CLAUDE.md"] = content_sha256(_lf(region))
+        installer.manifest.setdefault("regions", {})["CLAUDE.md"] = \
+            content_sha256(_lf(region))
 
 
-def _hand_over_template(project_dir: Path, template_text: str, why: str,
-                        dry_run: bool) -> None:
+def _hand_over_template(installer: Installer, template_text: str,
+                        why: str) -> None:
     """Cannot tell where our part ends: leave the file, drop the template beside it."""
-    if not dry_run:
-        save_upgrade(project_dir, "CLAUDE.md", template_text)
+    if not installer.dry_run:
+        save_upgrade(installer.project_dir, "CLAUDE.md", template_text)
     print(f"  - CLAUDE.md (kept — {why})")
-    print(f"    {_dry(dry_run)}Current template saved to: .claude/.upgrades/CLAUDE.md")
+    print(f"    {_dry(installer.dry_run)}Current template saved to: "
+          ".claude/.upgrades/CLAUDE.md")
 
 
-def update_claude_md(project_dir: Path, template_text: str, manifest: dict = None,
-                     prompt=None, dry_run: bool = False) -> None:
-    """Refresh our block in CLAUDE.md without touching a line the user wrote."""
-    dest = project_dir / "CLAUDE.md"
-    manifest = manifest if manifest is not None else {}
+def update_claude_md(template_text: str, installer: Installer) -> None:
+    """Refresh our block in CLAUDE.md without touching a line the user wrote.
+
+    The one file that does not go through Installer.install: it lives outside
+    .claude/, only a marked block inside it is ours, and the question it puts
+    to the user is worded for that. What it does share is the promise — the
+    version that loses is kept — so it uses the same two halves of it.
+    """
+    dest = installer.project_dir / "CLAUDE.md"
     span = marked_span(template_text)
     region = template_text[span[0]:span[1]] if span else None
 
     if not dest.exists():
-        _write_claude_md(dest, template_text, region, manifest, dry_run)
-        print(f"  - {_dry(dry_run)}CLAUDE.md (created)")
+        _write_claude_md(installer, template_text, region)
+        print(f"  - {_dry(installer.dry_run)}CLAUDE.md (created)")
         return
     if region is None:  # the template lost its markers — never guess
-        _hand_over_template(project_dir, template_text, "template has no markers", dry_run)
+        _hand_over_template(installer, template_text, "template has no markers")
         return
 
     current = read_verbatim(dest)
-    plan = _claude_md_plan(current, region, manifest)
+    plan = _claude_md_plan(current, region, installer.manifest)
     if plan is None:
-        _hand_over_template(project_dir, template_text,
-                            "our block is not marked and not recognisable", dry_run)
+        _hand_over_template(installer, template_text,
+                            "our block is not marked and not recognisable")
         return
-    if plan.wording and not _resolve_modified(prompt, project_dir, "CLAUDE.md", dest,
-                                              plan.text, wording=plan.wording,
-                                              dry_run=dry_run):
-        print("  - CLAUDE.md (yours kept)")
-        print(f"    {_dry(dry_run)}Ours saved to: .claude/.upgrades/CLAUDE.md")
-        return
-    _write_claude_md(dest, plan.text, region, manifest, dry_run)
-    print(f"  - {_dry(dry_run)}CLAUDE.md ({plan.note})")
+    if plan.wording:
+        if not installer.resolve("CLAUDE.md", dest, plan.text, plan.wording):
+            print("  - CLAUDE.md (yours kept)")
+            print(f"    {_dry(installer.dry_run)}Ours saved to: "
+                  ".claude/.upgrades/CLAUDE.md")
+            return
+        if installer.keep_theirs("CLAUDE.md", dest):
+            print("    Yours saved to: .claude/.upgrades/CLAUDE.md.mine")
+    _write_claude_md(installer, plan.text, region)
+    print(f"  - {_dry(installer.dry_run)}CLAUDE.md ({plan.note})")
 
 
 def _install_settings(project_dir: Path, dry_run: bool) -> None:
@@ -1489,23 +1433,24 @@ def _replace_unparseable_settings(project_dir: Path, dest: Path, src: Path,
         print("    WARNING: could not keep a copy of your settings.json")
 
 
-def copy_settings_and_claude_md(project_dir: Path, project_name: str,
-                                dry_run: bool = False, manifest: dict = None,
-                                prompt=None) -> None:
+def copy_settings_and_claude_md(project_name: str,
+                                installer: Installer) -> None:
     """Copy settings.json (merge hooks) and refresh our block in CLAUDE.md."""
     print("\n[5/6] Copying settings and CLAUDE.md...")
 
-    _install_settings(project_dir, dry_run)
+    _install_settings(installer.project_dir, installer.dry_run)
 
     # --- settings.local.json: same stale-path rewrite, never templated ---
-    for old_cmd, _ in (migrate_local_settings_hooks(project_dir) if not dry_run else []):
+    migrated = ([] if installer.dry_run
+                else migrate_local_settings_hooks(installer.project_dir))
+    for old_cmd, _ in migrated:
         print(f"  - settings.local.json: rewrote hook path: {old_cmd[:70]}")
 
     # --- CLAUDE.md: refresh our marked block, leave the rest of the file alone ---
     claude_src = TEMPLATES_DIR / "CLAUDE.md"
     if claude_src.exists():
         template_text = read_verbatim(claude_src).replace("[Project]", project_name)
-        update_claude_md(project_dir, template_text, manifest, prompt, dry_run)
+        update_claude_md(template_text, installer)
 
     print("  DONE")
 
@@ -1623,8 +1568,6 @@ def bootstrap_project(
         print(f"\nERROR: Templates not found: {TEMPLATES_DIR}")
         return 1
 
-    all_skipped = []
-
     # Files the user edited are a question, not a silent skip. --force answers
     # "take ours" for all of them, --keep-mine answers "keep mine", a dry run
     # asks nothing, and a run with no person attached keeps the user's files.
@@ -1636,16 +1579,16 @@ def bootstrap_project(
     if prompt.will_ask:
         print("\nFiles you edited will be shown one by one — you decide each.")
 
+    installer = Installer(project_dir, manifest, force=force, prompt=prompt,
+                          dry_run=dry_run)
+
     if not install_beads(project_dir, dry_run):
         return 1
 
-    all_skipped += copy_agents(project_dir, resolved_name, manifest, force,
-                               prompt, dry_run)
-    copy_hooks(project_dir, manifest, dry_run)
-    all_skipped += copy_rules_and_skills(
-        project_dir, with_rules, lang, manifest, force, prompt, dry_run,
-    )
-    copy_settings_and_claude_md(project_dir, resolved_name, dry_run, manifest, prompt)
+    copy_agents(resolved_name, installer)
+    copy_hooks(installer)
+    copy_rules_and_skills(with_rules, lang, installer)
+    copy_settings_and_claude_md(resolved_name, installer)
     setup_gitignore(project_dir, dry_run)
 
     # Read version from package.json (same package as bootstrap.py)
@@ -1674,9 +1617,9 @@ def bootstrap_project(
     print("BOOTSTRAP COMPLETE")
     print("=" * 60)
 
-    if all_skipped:
-        print(f"\n  {len(all_skipped)} file(s) kept as yours:")
-        for rel in all_skipped:
+    if installer.skipped:
+        print(f"\n  {len(installer.skipped)} file(s) kept as yours:")
+        for rel in installer.skipped:
             print(f"    - {rel}")
             print(f"      {_dry(dry_run)}Ours is next to it: .claude/.upgrades/{rel}")
         print("    Re-run with --force to take ours for all of them.")
