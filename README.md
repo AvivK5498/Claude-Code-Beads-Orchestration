@@ -123,7 +123,7 @@ First install and re-install use the same command: `npx claude-protocol init`.
 - **settings.json** — hooks merged by event type. Your existing hooks stay.
 - **.gitignore** — missing entries appended. Nothing removed.
 
-Use `--force` to take our version of every file. It is not destructive either: any file whose content no longer matches the manifest is copied to `.claude/.upgrades/<path>.mine` before being overwritten.
+Use `--force` to take our version of every file. Rules, agents and the CLAUDE.md block are copied to `.claude/.upgrades/<path>.mine` first, so the version you replace is still there. Hooks and the project-discovery skill are replaced outright with no copy — they are our code, and they are replaced on every run anyway.
 
 ### What happens at session start
 

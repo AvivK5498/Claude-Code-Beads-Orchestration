@@ -2328,6 +2328,36 @@ class TestForceKeepsWhatItOverwrites:
 
         assert not (tmp_path / ".claude" / ".upgrades").exists()
 
+    def test_a_hand_broken_manifest_does_not_crash_the_run(self, tmp_path, monkeypatch):
+        """A hand-edited .manifest.json can carry "files": null."""
+        monkeypatch.setattr(bootstrap, "install_beads", lambda pd, *a, **kw: True)
+        monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda pd: None)
+        _modified_rule(tmp_path, text="my own standard\n")
+        (tmp_path / ".claude" / ".manifest.json").write_text(
+            '{"version": "3.7.0", "files": null}', encoding="utf-8")
+
+        rc = bootstrap.bootstrap_project(
+            project_dir=tmp_path, project_name="Demo", with_rules=True,
+            lang="en", force=True, upgrade=False, dry_run=False,
+        )
+
+        assert rc == 0
+        mine = tmp_path / ".claude" / ".upgrades" / "rules" / "implementation-standard.md.mine"
+        assert mine.exists()
+
+    def test_a_file_that_cannot_be_hashed_is_not_a_crash(self, tmp_path, monkeypatch):
+        """The docstring promises this; the hashing call used to sit outside the try."""
+        dest = tmp_path / "rules" / "x.md"
+        write_verbatim(dest, "mine\n")
+
+        def refuse(_):
+            raise PermissionError("locked")
+
+        monkeypatch.setattr(bootstrap, "file_sha256", refuse)
+
+        assert bootstrap._preserve_before_force(
+            tmp_path, "rules/x.md", dest, {"files": {}}, False) is False
+
 
 # ============================================================================
 # --dry-run and beads
@@ -2359,6 +2389,22 @@ class TestDryRunDoesNotInstallBeads:
         assert ran == [], f"a preview ran {ran}"
         assert list(tmp_path.rglob("*")) == [], "a preview created files"
 
+    def test_preview_does_not_create_the_project_directory(self, tmp_path, monkeypatch):
+        """Zero bytes is not zero writes: the mkdir ran before the flag was read."""
+        monkeypatch.setattr(bootstrap.subprocess, "run",
+                            lambda cmd, *a, **kw: _FakeRun())
+        monkeypatch.setattr(bootstrap.shutil, "which", lambda name: "bd")
+        monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda pd: None)
+        target = tmp_path / "not" / "there" / "yet"
+
+        rc = bootstrap.bootstrap_project(
+            project_dir=target, project_name="Demo", with_rules=True,
+            lang="en", force=False, upgrade=False, dry_run=True,
+        )
+
+        assert rc == 0
+        assert not target.exists()
+
     def test_a_real_run_still_installs(self, tmp_path, monkeypatch):
         ran = []
         monkeypatch.setattr(bootstrap.subprocess, "run",
@@ -2379,7 +2425,7 @@ class TestDryRunDoesNotInstallBeads:
 
 class TestBatchUpgradeDoesNotAsk:
     def _run(self, tmp_path, monkeypatch, force=False, keep_mine=False):
-        (tmp_path / "proj" / ".beads").mkdir(parents=True)
+        (tmp_path / "proj" / ".beads").mkdir(parents=True, exist_ok=True)
         prompts = []
         monkeypatch.setattr(bootstrap, "_stdin_is_a_person", lambda: True)
         _stub_heavy_steps(monkeypatch)
@@ -2406,6 +2452,19 @@ class TestBatchUpgradeDoesNotAsk:
 
         assert not prompt.will_ask
         assert prompt.ask("rules/x.md", tmp_path, "ours") == bootstrap.ConflictPrompt.TAKE
+
+    def test_the_banner_says_what_will_actually_happen(self, tmp_path, monkeypatch,
+                                                       capsys):
+        """One line tells the operator what is about to hit twenty projects."""
+        self._run(tmp_path, monkeypatch)
+        kept = capsys.readouterr().out
+
+        self._run(tmp_path, monkeypatch, force=True)
+        forced = capsys.readouterr().out
+
+        assert "Files you edited are kept" in kept
+        assert "Files you edited are kept" not in forced, "banner contradicts --force"
+        assert "Taking our version of every file" in forced
 
 
 class TestClaudeMdDryRunWritesNothing:

@@ -392,7 +392,15 @@ def load_manifest(project_dir: Path) -> dict:
     manifest_path = project_dir / ".claude" / ".manifest.json"
     if manifest_path.exists():
         try:
-            return json.loads(manifest_path.read_text(encoding="utf-8"))
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("manifest is not an object")
+            # A hand-edited manifest can carry "files": null or a list. Every
+            # step downstream reads and writes it as a dict; normalise once
+            # here rather than guard at a dozen call sites.
+            if not isinstance(data.get("files"), dict):
+                data["files"] = {}
+            return data
         except Exception:
             pass
     return {"version": None, "installed_at": None, "files": {}}
@@ -420,7 +428,7 @@ def should_update_file(
     if not file_path.exists():
         return True, "new"
     current_hash = file_sha256(file_path)
-    recorded_hash = manifest.get("files", {}).get(relative_key)
+    recorded_hash = (manifest.get("files") or {}).get(relative_key)
     if recorded_hash is None:
         # Legacy install — treat as user-modified (safe default)
         return False, "no_manifest"
@@ -548,9 +556,9 @@ def _preserve_before_force(project_dir: Path, rel_key: str, dest: Path,
     """
     if dry_run or not dest.exists():
         return False
-    if file_sha256(dest) == (manifest or {}).get("files", {}).get(rel_key):
-        return False
     try:
+        if file_sha256(dest) == ((manifest or {}).get("files") or {}).get(rel_key):
+            return False
         save_upgrade(project_dir, rel_key + ".mine", read_verbatim(dest))
     except Exception:
         return False  # unreadable file: overwriting is still what --force means
@@ -1496,7 +1504,8 @@ def bootstrap_project(
     keep_mine: bool = False,
 ) -> int:
     """Run bootstrap for a single project. Returns exit code (0 = success)."""
-    project_dir.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        project_dir.mkdir(parents=True, exist_ok=True)
     resolved_name = project_name or infer_project_name(project_dir)
 
     # An upgrade must not silently switch a project's language back to English:
@@ -1614,8 +1623,12 @@ def run_batch_upgrade(
         keep_mine = True
 
     print(f"\n[BATCH UPGRADE] Scanning {parent_dir}")
-    print("  Files you edited are kept; ours go to .claude/.upgrades/"
-          + ("" if force else " (--force to take ours)"))
+    if force:
+        print("  Taking our version of every file;"
+              " yours go to .claude/.upgrades/")
+    else:
+        print("  Files you edited are kept; ours go to .claude/.upgrades/"
+              " (--force to take ours)")
     candidates = sorted(p for p in parent_dir.iterdir() if p.is_dir())
     upgraded = 0
     skipped: list = []
