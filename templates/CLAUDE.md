@@ -24,8 +24,10 @@
 
 ## Workflow
 
-**Beads = single source of truth.** Every task, bug, piece of tech debt and
-follow-up goes into beads. Context gets compacted — beads persist.
+**Beads = single source of truth.** Every task the user asked for goes into
+beads, and so does anything found along the way that will not fit inside the
+current work — a small finding gets fixed on the spot instead. Context gets
+compacted — beads persist.
 
 How work starts — entry points, understanding, plan — is `pre-code-workflow.md`.
 Whether a plan becomes one bead or an epic, and how a task is run and closed, is

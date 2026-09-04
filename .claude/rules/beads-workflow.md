@@ -9,16 +9,37 @@ reference at session start, and `bd <cmd> --help` covers the rest.
 
 ### When to create a bead
 
-Anything the user asks you to build, fix, or change, and anything non-trivial
-you decide to investigate. Also whatever you stumble on along the way — a bug,
-tech debt, a follow-up that will not happen now:
+A bead is for what the user asked for, and for what will not fit inside the
+current work. A bead costs: describe it, start it, create a worktree, open a
+PR, wait for the merge, close it. For a three-line change that costs more than
+the change itself.
+
+Something you stumble on along the way has two outcomes, never a third.
+
+**Fix it now, in the current branch**, when all of it holds:
+
+- under 10 lines
+- in a file you are already editing for the current bead
+- one line in the commit message is enough for a reviewer to follow it
+
+A fix unrelated to the current work goes in its own commit, so it stays visible
+apart from the main change.
+
+**Create a bead** when any of it holds:
+
+- behaviour visible from the outside changes — that is a decision, not a fix
+- database schema, a migration, a dependency, an external interface
+- it needs tests of its own
+- you would have to drop the current work to understand the cause
 
 ```bash
 bd create "Fix: [what]" -d "Discovered while working on {CURRENT_BEAD}: [details]"
 ```
 
-Do not fix it inline unless it is trivial; the bead is what keeps it from being
-forgotten.
+Never leave it silent: either the change is in a commit, or there is a bead.
+
+**Stop signal:** about to file a third incidental bead during one task — stop.
+Two of the three were probably meant to be done on the spot.
 
 **Not a bead:** a quick fix the user approved (<10 lines, feature branch), and
 research or discussion with no code changes planned.
@@ -64,6 +85,8 @@ child is done. Never leave a bead `in_progress` across sessions without a reason
 - Work ONLY in your worktree: `.worktrees/bd-{BEAD_ID}/`
 - Commit frequently with descriptive messages
 - Log progress: `bd comments add {BEAD_ID} "Completed X, working on Y"`
+- Do not file incidental findings as beads yourself — one line in the report,
+  `Found along the way: …`; the orchestrator decides
 
 ## Task Completion
 
@@ -85,6 +108,7 @@ All of it, in order:
    Files: [names only]
    Tests: pass
    Summary: [1 sentence]
+   Found along the way: [one line, or no line at all]
    ```
 
 ## Banned
@@ -93,6 +117,7 @@ All of it, in order:
 - Implementing without BEAD_ID
 - Merging your own branch (user merges via PR)
 - Editing files outside your worktree
+- Filing incidental beads from a worktree — the finding goes in the report line
 - Raw `git worktree add` — it creates a shadow `.beads/` copy, leaks dolt
   processes and loses bead data. Use `bd worktree create`. Removing one with
   raw `git worktree remove --force` + `git worktree prune` IS allowed, because
