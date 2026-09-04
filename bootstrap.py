@@ -667,12 +667,10 @@ class Installer:
             ok = self.resolve(rel_key, dest, text)
             reason = "replaced on request" if ok else reason
         if not ok:
-            self.skipped.append(rel_key)
-            print(f"  - {label} (yours kept)")
-            print(f"    {_dry(self.dry_run)}Ours saved to: .claude/.upgrades/{rel_key}")
+            self.keep_yours(rel_key, label, text)
             return
-        if self.keep_theirs(rel_key, dest):
-            print(f"    Yours saved to: .claude/.upgrades/{rel_key}.mine")
+        if not self.take_ours(rel_key, label, dest):
+            return
         if not self.dry_run:
             write_verbatim(dest, text)
             self.manifest["files"][rel_key] = file_sha256(dest)
@@ -681,18 +679,42 @@ class Installer:
 
     def resolve(self, rel_key: str, dest: Path, new_text: str,
                 wording: PromptWording = None) -> bool:
-        """Ask (or apply the standing answer). True → write ours over theirs.
-
-        Whichever way it goes, the version that loses is preserved under
-        .claude/.upgrades/ — ours here, theirs in keep_theirs. Except in a dry
-        run: saving the loser is itself a write, and a preview writes nothing.
-        """
+        """Ask (or apply the standing answer). True → write ours over theirs."""
         prompt = self.prompt or ConflictPrompt(interactive=False)
-        if prompt.ask(rel_key, dest, new_text, wording) == ConflictPrompt.TAKE:
-            return True
-        if not self.dry_run:
-            save_upgrade(self.project_dir, rel_key, new_text)
-        return False
+        return prompt.ask(rel_key, dest, new_text, wording) == ConflictPrompt.TAKE
+
+    def keep_yours(self, rel_key: str, label: str, text: str) -> None:
+        """Their file stays; ours goes where they can compare the two.
+
+        Failing to park ours costs nothing that cannot be had again — it ships
+        with the package — so the run says so and carries on.
+        """
+        self.skipped.append(rel_key)
+        print(f"  - {label} (yours kept)")
+        try:
+            if not self.dry_run:
+                save_upgrade(self.project_dir, rel_key, text)
+        except OSError as e:
+            print(f"    We could not put ours beside it: {e.strerror or e}")
+            return
+        print(f"    {_dry(self.dry_run)}Ours saved to: .claude/.upgrades/{rel_key}")
+
+    def take_ours(self, rel_key: str, label: str, dest: Path) -> bool:
+        """Copy theirs aside before ours goes in. False → do not write.
+
+        Theirs cannot be had again. So if the copy cannot be made, the file is
+        left exactly as it is: overwriting what we failed to save is the one
+        outcome this whole file exists to prevent, and --force does not mean
+        "destroy it if the shelf is missing".
+        """
+        try:
+            if self.keep_theirs(rel_key, dest):
+                print(f"    Yours saved to: .claude/.upgrades/{rel_key}.mine")
+        except OSError as e:
+            self.clash(rel_key, label,
+                       f"we could not copy yours aside first: {e.strerror or e}")
+            return False
+        return True
 
     def keep_theirs(self, rel_key: str, dest: Path) -> bool:
         """Save what we are about to overwrite. True when a copy was made.
@@ -702,16 +724,23 @@ class Installer:
         matter. This is also the only place a --force run can save the user's
         work, because should_update_file answers "forced" without ever looking
         at the file.
+
+        Raises OSError when the copy cannot be parked — see take_ours, which is
+        the only caller and the one that decides what that means.
         """
         if self.dry_run or not dest.exists():
             return False
         try:
             raw = dest.read_bytes()
-            if content_sha256_bytes(raw) == self.manifest["files"].get(rel_key):
-                return False
-            save_replaced_version(self.project_dir, rel_key, raw.decode("utf-8"))
-        except Exception:
-            return False  # unreadable file: overwriting is still what was asked
+        except OSError:
+            return False  # unreadable: overwriting is still what was asked
+        if content_sha256_bytes(raw) == self.manifest["files"].get(rel_key):
+            return False
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return False  # not text; there is no version of it we can park
+        save_replaced_version(self.project_dir, rel_key, text)
         return True
 
 
@@ -1177,18 +1206,21 @@ def copy_hooks(installer: Installer) -> None:
 
     The one kind of file that is never a question: hooks are enforcement code,
     not text anyone is meant to tune, so this stays outside Installer.install.
+    What it does share is the check for something else standing in the way —
+    a file named .claude/hooks, or a directory named like a hook.
     """
     print("\n[3/6] Copying hooks...")
-    hooks_dir = installer.project_dir / ".claude" / "hooks"
-    if not installer.dry_run:
-        hooks_dir.mkdir(parents=True, exist_ok=True)
-
-    for hook_file in (TEMPLATES_DIR / "hooks").glob("*.cjs"):
-        dest = hooks_dir / hook_file.name
+    for src in sorted((TEMPLATES_DIR / "hooks").glob("*.cjs")):
+        rel_key = f"hooks/{src.name}"
+        dest = installer.path(rel_key)
+        blocked = installer.blocked_by(dest)
+        if blocked:
+            installer.clash(rel_key, src.name, blocked)
+            continue
         if not installer.dry_run:
-            shutil.copy2(hook_file, dest)
-            installer.manifest["files"][f"hooks/{hook_file.name}"] = file_sha256(dest)
-        print(f"  - {_dry(installer.dry_run)}{hook_file.name}")
+            write_verbatim(dest, read_verbatim(src))
+            installer.manifest["files"][rel_key] = file_sha256(dest)
+        print(f"  - {_dry(installer.dry_run)}{src.name}")
     print("  DONE")
 
 
@@ -1408,17 +1440,15 @@ def update_claude_md(template_text: str, installer: Installer) -> None:
         return
     if plan.wording:
         if not installer.resolve("CLAUDE.md", dest, plan.text, plan.wording):
-            print("  - CLAUDE.md (yours kept)")
-            print(f"    {_dry(installer.dry_run)}Ours saved to: "
-                  ".claude/.upgrades/CLAUDE.md")
+            installer.keep_yours("CLAUDE.md", "CLAUDE.md", plan.text)
             return
-        if installer.keep_theirs("CLAUDE.md", dest):
-            print("    Yours saved to: .claude/.upgrades/CLAUDE.md.mine")
+        if not installer.take_ours("CLAUDE.md", "CLAUDE.md", dest):
+            return
     _write_claude_md(installer, plan.text, region)
     print(f"  - {_dry(installer.dry_run)}CLAUDE.md ({plan.note})")
 
 
-def _install_settings(project_dir: Path, dry_run: bool) -> None:
+def _install_settings(installer: Installer) -> None:
     """Merge our hook entries into .claude/settings.json, or replace it.
 
     The merge is the only write we make into a file the user owns, so the
@@ -1426,9 +1456,15 @@ def _install_settings(project_dir: Path, dry_run: bool) -> None:
     parse, which usually means someone was editing it rather than that it is
     worthless.
     """
+    project_dir, dry_run = installer.project_dir, installer.dry_run
     dest = project_dir / ".claude" / "settings.json"
     src = TEMPLATES_DIR / "settings.json"
     if not src.exists():
+        return
+    blocked = installer.blocked_by(dest)
+    if blocked:
+        # shutil.copy2 onto a directory would quietly file ours inside theirs.
+        installer.clash("settings.json", "settings.json", blocked)
         return
     if not dest.exists():
         if not dry_run:
@@ -1444,7 +1480,10 @@ def _install_settings(project_dir: Path, dry_run: bool) -> None:
         _replace_unparseable_settings(project_dir, dest, src, dry_run)
         return
     if not dry_run:
-        save_upgrade(project_dir, "settings.json.before-merge", before)
+        try:
+            save_upgrade(project_dir, "settings.json.before-merge", before)
+        except OSError as e:
+            print(f"    We could not keep a copy first: {e.strerror or e}")
         write_verbatim(dest, json.dumps(existing, indent=2) + "\n")
     print(f"  - {_dry(dry_run)}settings.json (merged hooks)")
     for old_cmd, _ in migrated:
@@ -1476,7 +1515,7 @@ def copy_settings_and_claude_md(project_name: str,
     """Copy settings.json (merge hooks) and refresh our block in CLAUDE.md."""
     print("\n[5/6] Copying settings and CLAUDE.md...")
 
-    _install_settings(installer.project_dir, installer.dry_run)
+    _install_settings(installer)
 
     # --- settings.local.json: same stale-path rewrite, never templated ---
     migrated = ([] if installer.dry_run
@@ -1493,7 +1532,7 @@ def copy_settings_and_claude_md(project_name: str,
     print("  DONE")
 
 
-def setup_gitignore(project_dir: Path, dry_run: bool = False) -> None:
+def setup_gitignore(installer: Installer) -> None:
     """Ensure .worktrees/, .claude/.upgrades/, and /issues.jsonl are in .gitignore.
 
     NOTE: the beads tracker travels with the repo, so .beads/ is intentionally
@@ -1502,8 +1541,15 @@ def setup_gitignore(project_dir: Path, dry_run: bool = False) -> None:
     /issues.jsonl guards against an export that lands at the repo root.
     """
     print("\n[6/6] Setting up .gitignore...")
+    project_dir, dry_run = installer.project_dir, installer.dry_run
     gitignore_path = project_dir / ".gitignore"
     entries = [".worktrees/", ".claude/.upgrades/", "/issues.jsonl"]
+
+    blocked = installer.blocked_by(gitignore_path)
+    if blocked:
+        installer.clash(".gitignore", ".gitignore", blocked)
+        print("  DONE")
+        return
 
     if gitignore_path.exists():
         content = gitignore_path.read_text(encoding='utf-8')
@@ -1606,6 +1652,15 @@ def bootstrap_project(
         print(f"\nERROR: Templates not found: {TEMPLATES_DIR}")
         return 1
 
+    # Everything we install lives inside .claude/. A file of that name is not a
+    # clash we can report per file and work around — it is every file at once,
+    # and the manifest we would write at the end has nowhere to go either.
+    claude_dir = project_dir / ".claude"
+    if claude_dir.exists() and not claude_dir.is_dir():
+        print(f"\nERROR: {claude_dir} is a file, not a directory.")
+        print("Everything we install lives inside it. Move it aside and run again.")
+        return 1
+
     # Files the user edited are a question, not a silent skip. --force answers
     # "take ours" for all of them, --keep-mine answers "keep mine", a dry run
     # asks nothing, and a run with no person attached keeps the user's files.
@@ -1627,7 +1682,7 @@ def bootstrap_project(
     copy_hooks(installer)
     copy_rules_and_skills(with_rules, lang, installer)
     copy_settings_and_claude_md(resolved_name, installer)
-    setup_gitignore(project_dir, dry_run)
+    setup_gitignore(installer)
 
     # Read version from package.json (same package as bootstrap.py)
     pkg_json = SCRIPT_DIR / "package.json"

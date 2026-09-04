@@ -185,7 +185,7 @@ class TestFromGoMod:
 
 class TestSetupGitignore:
     def test_creates_gitignore_when_missing(self, tmp_path, capsys):
-        setup_gitignore(tmp_path)
+        setup_gitignore(_installer(tmp_path))
 
         gitignore = tmp_path / ".gitignore"
         assert gitignore.exists()
@@ -196,7 +196,7 @@ class TestSetupGitignore:
     def test_does_not_ignore_whole_beads_dir(self, tmp_path, capsys):
         """The tracker travels with the repo — .beads/ must NOT be ignored
         (that would hide the canonical .beads/issues.jsonl)."""
-        setup_gitignore(tmp_path)
+        setup_gitignore(_installer(tmp_path))
 
         lines = (tmp_path / ".gitignore").read_text().splitlines()
         assert ".beads/" not in lines
@@ -204,7 +204,7 @@ class TestSetupGitignore:
 
     def test_ignores_root_issues_jsonl(self, tmp_path, capsys):
         """A stray /issues.jsonl export at repo root must be ignored."""
-        setup_gitignore(tmp_path)
+        setup_gitignore(_installer(tmp_path))
 
         content = (tmp_path / ".gitignore").read_text()
         assert "/issues.jsonl" in content
@@ -213,7 +213,7 @@ class TestSetupGitignore:
         gitignore = tmp_path / ".gitignore"
         gitignore.write_text("node_modules/\n.env\n")
 
-        setup_gitignore(tmp_path)
+        setup_gitignore(_installer(tmp_path))
 
         content = gitignore.read_text()
         assert "node_modules/" in content
@@ -227,7 +227,7 @@ class TestSetupGitignore:
             "node_modules/\n.worktrees/\n.claude/.upgrades/\n/issues.jsonl\n"
         )
 
-        setup_gitignore(tmp_path)
+        setup_gitignore(_installer(tmp_path))
 
         content = gitignore.read_text()
         # Should not duplicate entries
@@ -238,7 +238,7 @@ class TestSetupGitignore:
         gitignore = tmp_path / ".gitignore"
         gitignore.write_text("node_modules/")  # no trailing newline
 
-        setup_gitignore(tmp_path)
+        setup_gitignore(_installer(tmp_path))
 
         content = gitignore.read_text()
         assert ".worktrees/" in content
@@ -247,8 +247,8 @@ class TestSetupGitignore:
 
     def test_idempotent_no_duplicates(self, tmp_path, capsys):
         """Running setup_gitignore twice must not duplicate any entry."""
-        setup_gitignore(tmp_path)
-        setup_gitignore(tmp_path)
+        setup_gitignore(_installer(tmp_path))
+        setup_gitignore(_installer(tmp_path))
 
         content = (tmp_path / ".gitignore").read_text()
         assert content.count(".worktrees/") == 1
@@ -259,7 +259,7 @@ class TestSetupGitignore:
         gitignore = tmp_path / ".gitignore"
         gitignore.write_text(".worktrees\n.claude/.upgrades\n/issues.jsonl\n")
 
-        setup_gitignore(tmp_path)
+        setup_gitignore(_installer(tmp_path))
 
         content = gitignore.read_text()
         # Should detect ".worktrees" matches ".worktrees/" and not add duplicate
@@ -270,15 +270,15 @@ class TestSetupGitignore:
         gitignore = tmp_path / ".gitignore"
         gitignore.write_text("node_modules/\n")
 
-        setup_gitignore(tmp_path)
+        setup_gitignore(_installer(tmp_path))
 
         content = gitignore.read_text()
         assert ".claude/.upgrades/" in content
 
     def test_upgrades_entry_not_duplicated_on_rerun(self, tmp_path, capsys):
         """Running setup_gitignore twice must not duplicate .claude/.upgrades/."""
-        setup_gitignore(tmp_path)
-        setup_gitignore(tmp_path)
+        setup_gitignore(_installer(tmp_path))
+        setup_gitignore(_installer(tmp_path))
 
         content = (tmp_path / ".gitignore").read_text()
         assert content.count(".claude/.upgrades/") == 1
@@ -2524,7 +2524,7 @@ class TestAFileWhereOurDirectoryGoes:
     """The blocker is not the destination but one of its parents, so a check on
     the destination alone would walk straight past it."""
 
-    @pytest.mark.parametrize("rel_dir", ["rules", "agents",
+    @pytest.mark.parametrize("rel_dir", ["rules", "agents", "hooks",
                                          "skills/project-discovery"])
     def test_the_rest_of_the_upgrade_still_lands(self, tmp_path, monkeypatch,
                                                  rel_dir):
@@ -2590,6 +2590,134 @@ class TestAFileEditedIntoInvalidUtf8:
         assert rc == 0
         assert "TDD" in read_verbatim(theirs)
         assert _finished(tmp_path)
+
+
+# ============================================================================
+# The write paths that do not go through install()
+# ============================================================================
+# copy_hooks, _install_settings and setup_gitignore each write on their own, and
+# .claude/.upgrades is written to from two more places. A check inside install()
+# does nothing for any of them.
+
+
+class TestAHookThatIsADirectory:
+    def test_the_rest_of_the_upgrade_still_lands(self, tmp_path, monkeypatch):
+        theirs = tmp_path / ".claude" / "hooks" / "bash-guard.cjs"
+        theirs.mkdir(parents=True)
+
+        rc = _run_bootstrap(tmp_path, monkeypatch)
+
+        assert rc == 0
+        assert theirs.is_dir()
+        assert _finished(tmp_path), "the upgrade stopped half-way"
+
+    def test_the_other_hooks_are_still_installed(self, tmp_path, monkeypatch):
+        (tmp_path / ".claude" / "hooks" / "bash-guard.cjs").mkdir(parents=True)
+
+        _run_bootstrap(tmp_path, monkeypatch)
+
+        assert (tmp_path / ".claude" / "hooks" / "session-start.cjs").is_file()
+
+
+class TestSettingsJsonThatIsADirectory:
+    def test_ours_is_not_filed_inside_theirs(self, tmp_path, monkeypatch):
+        """shutil.copy2 onto a directory copies into it, quietly and wrongly."""
+        theirs = tmp_path / ".claude" / "settings.json"
+        theirs.mkdir(parents=True)
+
+        rc = _run_bootstrap(tmp_path, monkeypatch)
+
+        assert rc == 0
+        assert list(theirs.iterdir()) == [], "we filed our settings inside theirs"
+        assert _finished(tmp_path), "the upgrade stopped half-way"
+
+
+class TestAGitignoreThatIsADirectory:
+    def test_the_rest_of_the_upgrade_still_lands(self, tmp_path, monkeypatch):
+        theirs = tmp_path / ".gitignore"
+        theirs.mkdir()
+
+        rc = _run_bootstrap(tmp_path, monkeypatch)
+
+        assert rc == 0
+        assert theirs.is_dir()
+        assert _finished(tmp_path), "the upgrade stopped half-way"
+
+
+class TestClaudeItselfIsAFile:
+    """Not a clash to work around: it is every file at once, and the manifest
+    we write at the end would have nowhere to go either."""
+
+    def test_the_run_stops_with_a_sentence(self, tmp_path, monkeypatch, capsys):
+        theirs = tmp_path / ".claude"
+        write_verbatim(theirs, "not a directory\n")
+
+        rc = _run_bootstrap(tmp_path, monkeypatch)
+
+        assert rc == 1
+        assert read_verbatim(theirs) == "not a directory\n"
+        out = capsys.readouterr().out
+        assert "is a file, not a directory" in out
+        assert "Move it aside" in out
+
+
+# ---------------------------------------------------------------------------
+# .claude/.upgrades is where every version that loses is parked. If it cannot
+# hold anything, the promise cannot be kept — and the answer is to touch
+# nothing, not to overwrite and hope.
+
+
+def _upgrades_blocked(tmp_path, rule_text="mine\n"):
+    """A project with an edited rule and nowhere to park a copy of it."""
+    rules = tmp_path / ".claude" / "rules"
+    rules.mkdir(parents=True)
+    write_verbatim(rules / "tdd-workflow.md", rule_text)
+    write_verbatim(tmp_path / ".claude" / ".upgrades", "not a directory\n")
+    save_manifest(tmp_path, {"files": {"rules/tdd-workflow.md": "sha256:stale"}})
+    return rules / "tdd-workflow.md"
+
+
+class TestNowhereToParkTheLosingVersion:
+    def test_keeping_yours_still_finishes_the_run(self, tmp_path, monkeypatch):
+        """Ours is the version that cannot be parked here, and ours ships with
+        the package — so the run says so and carries on."""
+        theirs = _upgrades_blocked(tmp_path)
+
+        rc = _run_bootstrap(tmp_path, monkeypatch)
+
+        assert rc == 0
+        assert read_verbatim(theirs) == "mine\n"
+        assert _finished(tmp_path), "the upgrade stopped half-way"
+
+    def test_force_does_not_overwrite_what_it_cannot_save(self, tmp_path,
+                                                          monkeypatch):
+        """The one outcome this whole file exists to prevent. --force used to
+        swallow the failed copy and write over the edit regardless."""
+        theirs = _upgrades_blocked(tmp_path)
+
+        rc = _run_bootstrap(tmp_path, monkeypatch, force=True)
+
+        assert rc == 0
+        assert read_verbatim(theirs) == "mine\n", "the edit was destroyed"
+        assert _finished(tmp_path), "the upgrade stopped half-way"
+
+    def test_it_is_named_in_the_closing_report(self, tmp_path, monkeypatch,
+                                               capsys):
+        _upgrades_blocked(tmp_path)
+
+        _run_bootstrap(tmp_path, monkeypatch, force=True)
+
+        out = capsys.readouterr().out
+        assert "rules/tdd-workflow.md" in out.split("we could not install")[1]
+
+    def test_a_file_we_can_park_is_still_installed(self, tmp_path, monkeypatch):
+        """Only the file whose copy failed is held back, not the whole run."""
+        _upgrades_blocked(tmp_path)
+
+        _run_bootstrap(tmp_path, monkeypatch, force=True)
+
+        assert "IMPLEMENTATION STANDARD" in read_verbatim(
+            tmp_path / ".claude" / "rules" / "implementation-standard.md")
 
 
 # ============================================================================
