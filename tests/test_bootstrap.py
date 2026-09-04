@@ -1024,7 +1024,7 @@ class TestUpgradeFlag:
 
         # Stub out heavy steps so test stays fast & offline
         monkeypatch.setattr(bootstrap, "cleanup_obsolete", fake_cleanup)
-        monkeypatch.setattr(bootstrap, "install_beads", lambda pd: True)
+        monkeypatch.setattr(bootstrap, "install_beads", lambda pd, *a, **kw: True)
         monkeypatch.setattr(bootstrap, "copy_agents", lambda *a, **kw: [])
         monkeypatch.setattr(bootstrap, "copy_hooks", lambda *a, **kw: None)
         monkeypatch.setattr(bootstrap, "copy_rules_and_skills", lambda *a, **kw: [])
@@ -1054,7 +1054,7 @@ class TestUpgradeFlag:
             }
 
         monkeypatch.setattr(bootstrap, "cleanup_obsolete", fake_cleanup)
-        monkeypatch.setattr(bootstrap, "install_beads", lambda pd: True)
+        monkeypatch.setattr(bootstrap, "install_beads", lambda pd, *a, **kw: True)
         monkeypatch.setattr(bootstrap, "copy_agents", lambda *a, **kw: [])
         monkeypatch.setattr(bootstrap, "copy_hooks", lambda *a, **kw: None)
         monkeypatch.setattr(bootstrap, "copy_rules_and_skills", lambda *a, **kw: [])
@@ -1542,7 +1542,7 @@ class TestRuleSets:
 
 def _stub_heavy_steps(monkeypatch):
     """Everything that talks to the network, bd, or git."""
-    monkeypatch.setattr(bootstrap, "install_beads", lambda pd: True)
+    monkeypatch.setattr(bootstrap, "install_beads", lambda pd, *a, **kw: True)
     monkeypatch.setattr(bootstrap, "copy_agents", lambda *a, **kw: [])
     monkeypatch.setattr(bootstrap, "copy_hooks", lambda *a, **kw: None)
     monkeypatch.setattr(bootstrap, "copy_rules_and_skills", lambda *a, **kw: [])
@@ -1870,7 +1870,7 @@ class TestDryRunWritesNothing:
         }
 
     def test_fresh_project_stays_empty(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(bootstrap, "install_beads", lambda pd: True)
+        monkeypatch.setattr(bootstrap, "install_beads", lambda pd, *a, **kw: True)
         monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda pd: None)
 
         rc = bootstrap.bootstrap_project(
@@ -1882,7 +1882,7 @@ class TestDryRunWritesNothing:
         assert list(tmp_path.rglob("*")) == [], "dry run created files"
 
     def test_existing_install_is_left_byte_for_byte(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(bootstrap, "install_beads", lambda pd: True)
+        monkeypatch.setattr(bootstrap, "install_beads", lambda pd, *a, **kw: True)
         monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda pd: None)
         # A real install first...
         bootstrap.bootstrap_project(
@@ -1901,7 +1901,7 @@ class TestDryRunWritesNothing:
         assert self._snapshot(tmp_path) == before
 
     def test_preview_still_reports_what_would_happen(self, tmp_path, monkeypatch, capsys):
-        monkeypatch.setattr(bootstrap, "install_beads", lambda pd: True)
+        monkeypatch.setattr(bootstrap, "install_beads", lambda pd, *a, **kw: True)
         monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda pd: None)
 
         bootstrap.bootstrap_project(
@@ -2228,7 +2228,7 @@ class TestClaudeMdAsksBeforeTouchingYourEdits:
 
     def test_an_unreadable_manifest_does_not_cost_you_the_block(self, tmp_path, monkeypatch):
         """load_manifest swallows a parse error and returns an empty manifest."""
-        monkeypatch.setattr(bootstrap, "install_beads", lambda pd: True)
+        monkeypatch.setattr(bootstrap, "install_beads", lambda pd, *a, **kw: True)
         monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda pd: None)
         monkeypatch.setattr("builtins.input", _explode)
         _installed_project(tmp_path, block="## Your Identity\n\nMY OWN RULE: no Friday deploys.\n")
@@ -2243,7 +2243,7 @@ class TestClaudeMdAsksBeforeTouchingYourEdits:
 
     def test_force_marks_the_block_without_asking(self, tmp_path, monkeypatch):
         """--force answers 'take ours' in advance, for CLAUDE.md too."""
-        monkeypatch.setattr(bootstrap, "install_beads", lambda pd: True)
+        monkeypatch.setattr(bootstrap, "install_beads", lambda pd, *a, **kw: True)
         monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda pd: None)
         monkeypatch.setattr("builtins.input", _explode)
         write_verbatim(tmp_path / "CLAUDE.md", LEGACY_CLAUDE_MD)
@@ -2259,7 +2259,7 @@ class TestClaudeMdAsksBeforeTouchingYourEdits:
         assert load_manifest(tmp_path).get("claude_md_block")
 
     def test_keep_mine_leaves_the_block_unmarked(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(bootstrap, "install_beads", lambda pd: True)
+        monkeypatch.setattr(bootstrap, "install_beads", lambda pd, *a, **kw: True)
         monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda pd: None)
         monkeypatch.setattr("builtins.input", _explode)
         write_verbatim(tmp_path / "CLAUDE.md", LEGACY_CLAUDE_MD)
@@ -2271,6 +2271,141 @@ class TestClaudeMdAsksBeforeTouchingYourEdits:
         )
 
         assert read_verbatim(tmp_path / "CLAUDE.md") == LEGACY_CLAUDE_MD
+
+
+# ============================================================================
+# --force still keeps what it overwrites
+# ============================================================================
+# should_update_file answers "forced" before the conflict prompt is ever
+# reached, so under --force nothing saved the user's version and an edited rule
+# was simply gone. Everywhere else in the upgrade the losing version survives.
+
+
+class TestForceKeepsWhatItOverwrites:
+    def test_an_edited_rule_is_recoverable(self, tmp_path):
+        manifest = _modified_rule(tmp_path, text="my own standard\n")
+        rule = tmp_path / ".claude" / "rules" / "implementation-standard.md"
+        before = read_verbatim(rule)
+
+        copy_rules_and_skills(tmp_path, True, "en", manifest, True, None, False)
+
+        assert "IMPLEMENTATION STANDARD" in read_verbatim(rule)
+        mine = tmp_path / ".claude" / ".upgrades" / "rules" / "implementation-standard.md.mine"
+        assert read_verbatim(mine) == before, "the copy is not byte-for-byte"
+
+    def test_an_edited_agent_is_recoverable(self, tmp_path):
+        agents = tmp_path / ".claude" / "agents"
+        agents.mkdir(parents=True)
+        write_verbatim(agents / "code-reviewer.md", "my own reviewer\n")
+        manifest = {"files": {"agents/code-reviewer.md": "sha256:something-else"}}
+
+        bootstrap.copy_agents(tmp_path, "Demo", manifest, True, None, False)
+
+        mine = tmp_path / ".claude" / ".upgrades" / "agents" / "code-reviewer.md.mine"
+        assert read_verbatim(mine) == "my own reviewer\n"
+
+    def test_a_file_you_never_touched_leaves_no_copy(self, tmp_path, monkeypatch):
+        """A .mine for every untouched file would bury the ones that matter."""
+        monkeypatch.setattr(bootstrap, "install_beads", lambda pd, *a, **kw: True)
+        monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda pd: None)
+        bootstrap.bootstrap_project(
+            project_dir=tmp_path, project_name="Demo", with_rules=True,
+            lang="en", force=False, upgrade=False, dry_run=False,
+        )
+
+        bootstrap.bootstrap_project(
+            project_dir=tmp_path, project_name="Demo", with_rules=True,
+            lang="en", force=True, upgrade=False, dry_run=False,
+        )
+
+        upgrades = tmp_path / ".claude" / ".upgrades"
+        assert not list(upgrades.rglob("*.mine"))
+
+    def test_a_preview_with_force_still_writes_nothing(self, tmp_path):
+        manifest = _modified_rule(tmp_path, text="my own standard\n")
+
+        copy_rules_and_skills(tmp_path, True, "en", manifest, True, None, True)
+
+        assert not (tmp_path / ".claude" / ".upgrades").exists()
+
+
+# ============================================================================
+# --dry-run and beads
+# ============================================================================
+# Every copy step honours the flag; install_beads never took it, so a preview
+# of a project without .beads/ created the directory and shelled out to bd.
+
+
+class _FakeRun:
+    returncode = 0
+    stdout = ""
+    stderr = ""
+
+
+class TestDryRunDoesNotInstallBeads:
+    def test_preview_neither_creates_beads_nor_shells_out(self, tmp_path, monkeypatch):
+        ran = []
+        monkeypatch.setattr(bootstrap.subprocess, "run",
+                            lambda cmd, *a, **kw: ran.append(cmd) or _FakeRun())
+        monkeypatch.setattr(bootstrap.shutil, "which", lambda name: "bd")
+        monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda pd: None)
+
+        rc = bootstrap.bootstrap_project(
+            project_dir=tmp_path, project_name="Demo", with_rules=True,
+            lang="en", force=False, upgrade=False, dry_run=True,
+        )
+
+        assert rc == 0
+        assert ran == [], f"a preview ran {ran}"
+        assert list(tmp_path.rglob("*")) == [], "a preview created files"
+
+    def test_a_real_run_still_installs(self, tmp_path, monkeypatch):
+        ran = []
+        monkeypatch.setattr(bootstrap.subprocess, "run",
+                            lambda cmd, *a, **kw: ran.append(cmd) or _FakeRun())
+        monkeypatch.setattr(bootstrap.shutil, "which", lambda name: "bd")
+
+        assert bootstrap.install_beads(tmp_path) is True
+        assert ran, "a real run did not call bd at all"
+
+
+# ============================================================================
+# --all: a batch upgrade does not interrogate
+# ============================================================================
+# README has always said a batch upgrade keeps your files and saves ours beside
+# them. The code only checked isatty, so upgrading twenty projects from your own
+# terminal meant twenty rounds of questions.
+
+
+class TestBatchUpgradeDoesNotAsk:
+    def _run(self, tmp_path, monkeypatch, force=False, keep_mine=False):
+        (tmp_path / "proj" / ".beads").mkdir(parents=True)
+        prompts = []
+        monkeypatch.setattr(bootstrap, "_stdin_is_a_person", lambda: True)
+        _stub_heavy_steps(monkeypatch)
+
+        def record(project_dir, with_rules, lang, manifest, force_, prompt=None,
+                   *args, **kwargs):
+            prompts.append(prompt)
+            return []
+
+        monkeypatch.setattr(bootstrap, "copy_rules_and_skills", record)
+        bootstrap.run_batch_upgrade(tmp_path, True, "en", force, False,
+                                    keep_mine=keep_mine)
+        assert len(prompts) == 1
+        return prompts[0]
+
+    def test_no_questions_even_at_a_terminal(self, tmp_path, monkeypatch):
+        prompt = self._run(tmp_path, monkeypatch)
+
+        assert not prompt.will_ask
+        assert prompt.ask("rules/x.md", tmp_path, "ours") == bootstrap.ConflictPrompt.KEEP
+
+    def test_force_still_takes_ours(self, tmp_path, monkeypatch):
+        prompt = self._run(tmp_path, monkeypatch, force=True)
+
+        assert not prompt.will_ask
+        assert prompt.ask("rules/x.md", tmp_path, "ours") == bootstrap.ConflictPrompt.TAKE
 
 
 class TestClaudeMdDryRunWritesNothing:

@@ -536,6 +536,27 @@ class ConflictPrompt:
             print(f"  ... {len(diff) - self._DIFF_LINES} more lines")
 
 
+def _preserve_before_force(project_dir: Path, rel_key: str, dest: Path,
+                           manifest: dict, dry_run: bool) -> bool:
+    """--force keeps what it overwrites too. True when a copy was made.
+
+    should_update_file answers "forced" before the conflict prompt is ever
+    reached, so this is the only place a --force run can save the user's
+    version — and without it an edited rule was simply gone. A file that still
+    matches the manifest is ours, and a copy of it would only bury the ones
+    that matter.
+    """
+    if dry_run or not dest.exists():
+        return False
+    if file_sha256(dest) == (manifest or {}).get("files", {}).get(rel_key):
+        return False
+    try:
+        save_upgrade(project_dir, rel_key + ".mine", read_verbatim(dest))
+    except Exception:
+        return False  # unreadable file: overwriting is still what --force means
+    return True
+
+
 def _dry(dry_run: bool) -> str:
     """Prefix for a line describing a write that a dry run did not make."""
     return "[DRY-RUN] " if dry_run else ""
@@ -929,9 +950,19 @@ def run_bd_doctor(project_dir: Path) -> None:
 # STEPS
 # ============================================================================
 
-def install_beads(project_dir: Path) -> bool:
+def install_beads(project_dir: Path, dry_run: bool = False) -> bool:
     """Install beads CLI and initialize .beads directory."""
     print("\n[1/6] Installing beads...")
+
+    if dry_run:
+        # A preview writes nothing and shells out to nothing. This step used to
+        # ignore the flag and create .beads/ on the project it was previewing.
+        have_bd = bool(shutil.which("bd"))
+        print(f"  - beads CLI {'already installed' if have_bd else 'would be installed'}")
+        if not (project_dir / ".beads").exists():
+            print("  - [DRY-RUN] would run 'bd init' in this project")
+        print("  DONE")
+        return True
 
     if not shutil.which("bd"):
         print("  - beads CLI (bd) not found, installing...")
@@ -1034,6 +1065,9 @@ def copy_agents(
                                    dry_run=dry_run)
             reason = "replaced on request" if ok else reason
         if ok:
+            if reason == "forced" and _preserve_before_force(
+                    project_dir, rel_key, dest, manifest, dry_run):
+                print(f"    yours saved to: .claude/.upgrades/{rel_key}.mine")
             if not dry_run:
                 copy_and_replace(agent_file, dest, replacements)
                 manifest["files"][rel_key] = file_sha256(dest)
@@ -1094,6 +1128,9 @@ def copy_rules_and_skills(
                                    dry_run=dry_run)
             reason = "replaced on request" if ok else reason
         if ok:
+            if reason == "forced" and _preserve_before_force(
+                    project_dir, rel_key, dest, manifest, dry_run):
+                print(f"    yours saved to: .claude/.upgrades/{rel_key}.mine")
             if not dry_run:
                 shutil.copy2(beads_src, dest)
                 manifest["files"][rel_key] = file_sha256(dest)
@@ -1117,6 +1154,9 @@ def copy_rules_and_skills(
                                            dry_run=dry_run)
                     reason = "replaced on request" if ok else reason
                 if ok:
+                    if reason == "forced" and _preserve_before_force(
+                            project_dir, rel_key, dest, manifest, dry_run):
+                        print(f"    yours saved to: .claude/.upgrades/{rel_key}.mine")
                     if not dry_run:
                         shutil.copy2(rule_file, dest)
                         manifest["files"][rel_key] = file_sha256(dest)
@@ -1497,7 +1537,7 @@ def bootstrap_project(
     if prompt.will_ask:
         print("\nFiles you edited will be shown one by one — you decide each.")
 
-    if not install_beads(project_dir):
+    if not install_beads(project_dir, dry_run):
         return 1
 
     all_skipped += copy_agents(project_dir, resolved_name, manifest, force,
@@ -1567,7 +1607,15 @@ def run_batch_upgrade(
         print(f"ERROR: --all parent directory not found: {parent_dir}")
         return 1
 
+    # Nobody upgrading twenty projects reads twenty diffs. A batch upgrade
+    # keeps every file the user edited and saves ours beside it — which is what
+    # the README has always promised. Only --force overrides that.
+    if not force:
+        keep_mine = True
+
     print(f"\n[BATCH UPGRADE] Scanning {parent_dir}")
+    print("  Files you edited are kept; ours go to .claude/.upgrades/"
+          + ("" if force else " (--force to take ours)"))
     candidates = sorted(p for p in parent_dir.iterdir() if p.is_dir())
     upgraded = 0
     skipped: list = []

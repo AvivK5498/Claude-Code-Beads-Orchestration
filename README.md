@@ -123,7 +123,7 @@ First install and re-install use the same command: `npx claude-protocol init`.
 - **settings.json** — hooks merged by event type. Your existing hooks stay.
 - **.gitignore** — missing entries appended. Nothing removed.
 
-Use `--force` to overwrite all files regardless of modifications.
+Use `--force` to take our version of every file. It is not destructive either: any file whose content no longer matches the manifest is copied to `.claude/.upgrades/<path>.mine` before being overwritten.
 
 ### What happens at session start
 
@@ -173,7 +173,7 @@ Restart Claude Code. Run `/project-discovery`.
 | `--project-name NAME` | Project name for CLAUDE.md (auto-inferred from package.json / pyproject.toml / Cargo.toml / go.mod) |
 | `--no-rules` | Skip dev rules (implementation, logging, TDD, resilience) |
 | `--lang en\|ru` | Language for dev rules (default: en) |
-| `--force` | Take our version of every file, no questions asked |
+| `--force` | Take our version of every file, no questions asked (yours is kept in `.claude/.upgrades/`) |
 | `--keep-mine` | Keep your version of every file you edited, no questions asked |
 
 ### Local development (before npm publish)
