@@ -495,3 +495,78 @@ describe('getProjectDir under a plugin', () => {
     expect(answer).not.toBe(repoRoot);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Which version is running, and what to say when a newer one is out
+// ---------------------------------------------------------------------------
+
+const { readOwnVersion, updateNotice } = require(utilsPath);
+
+describe('readOwnVersion', () => {
+  it('reads the plugin manifest when it runs as a plugin', () => {
+    const pluginRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hu-plugin-'));
+    fs.mkdirSync(path.join(pluginRoot, '.claude-plugin'));
+    fs.writeFileSync(path.join(pluginRoot, '.claude-plugin', 'plugin.json'),
+                     JSON.stringify({ name: 'claude-protocol', version: '3.9.1' }));
+
+    expect(withPluginRoot(pluginRoot, () => readOwnVersion())).toBe('3.9.1');
+  });
+
+  it('reads the project manifest for an install from npx', () => {
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), 'hu-npx-'));
+    fs.mkdirSync(path.join(project, '.claude'));
+    fs.writeFileSync(path.join(project, '.claude', '.manifest.json'),
+                     JSON.stringify({ version: '3.4.0', files: {} }));
+
+    expect(withPluginRoot(undefined,
+      () => withEnv(project, () => readOwnVersion()))).toBe('3.4.0');
+  });
+
+  it('is null when there is nothing to read', () => {
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'hu-none-'));
+
+    expect(withPluginRoot(undefined,
+      () => withEnv(empty, () => readOwnVersion()))).toBeNull();
+  });
+
+  it('is null when the manifest has no version', () => {
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), 'hu-noversion-'));
+    fs.mkdirSync(path.join(project, '.claude'));
+    fs.writeFileSync(path.join(project, '.claude', '.manifest.json'),
+                     JSON.stringify({ files: {} }));
+
+    expect(withPluginRoot(undefined,
+      () => withEnv(project, () => readOwnVersion()))).toBeNull();
+  });
+});
+
+describe('updateNotice', () => {
+  it('says nothing when the running version is current', () => {
+    expect(updateNotice('3.7.0', '3.7.0', false)).toBeNull();
+    expect(updateNotice('3.8.0', '3.7.0', false)).toBeNull();
+  });
+
+  it('says nothing when the latest version could not be read', () => {
+    expect(updateNotice('3.7.0', null, false)).toBeNull();
+    expect(updateNotice('3.7.0', '', true)).toBeNull();
+  });
+
+  it('names both versions when one is behind', () => {
+    const lines = updateNotice('3.6.0', '3.7.0', false).join('\n');
+
+    expect(lines).toContain('3.6.0');
+    expect(lines).toContain('3.7.0');
+  });
+
+  it('tells an npx install to run the upgrade', () => {
+    expect(updateNotice('3.6.0', '3.7.0', false).join('\n'))
+      .toContain('npx claude-protocol@latest upgrade');
+  });
+
+  it('warns a plugin install that auto-update is off by default', () => {
+    const lines = updateNotice('3.6.0', '3.7.0', true).join('\n');
+
+    expect(lines).toContain('/plugin');
+    expect(lines).toContain('off by default');
+  });
+});
