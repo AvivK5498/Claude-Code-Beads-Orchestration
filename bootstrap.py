@@ -1704,7 +1704,16 @@ def bootstrap_project(
     manifest["lang"] = lang
     manifest["installed_at"] = datetime.now(timezone.utc).isoformat()
     if not dry_run:
-        save_manifest(project_dir, manifest)
+        try:
+            save_manifest(project_dir, manifest)
+        except OSError as e:
+            # The last write of the run, and the one that cannot be shrugged
+            # off: it is the record of which files are ours.
+            print(f"\nERROR: could not write .claude/.manifest.json: "
+                  f"{e.strerror or e}")
+            print("Everything else is installed. Without that record the next "
+                  "run treats every file as yours and asks before touching it.")
+            return 1
 
     print("\n" + "=" * 60)
     print("BOOTSTRAP COMPLETE")

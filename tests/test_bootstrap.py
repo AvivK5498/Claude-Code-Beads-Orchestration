@@ -2632,6 +2632,29 @@ class TestSettingsJsonThatIsADirectory:
         assert _finished(tmp_path), "the upgrade stopped half-way"
 
 
+class TestAManifestThatIsADirectory:
+    """The last write of the run, and the record of which files are ours."""
+
+    def test_the_run_says_so_instead_of_crashing(self, tmp_path, monkeypatch,
+                                                 capsys):
+        (tmp_path / '.claude' / '.manifest.json').mkdir(parents=True)
+
+        rc = _run_bootstrap(tmp_path, monkeypatch)
+
+        assert rc == 1
+        assert (tmp_path / '.claude' / '.manifest.json').is_dir()
+        out = capsys.readouterr().out
+        assert 'could not write .claude/.manifest.json' in out
+
+    def test_everything_else_was_still_installed(self, tmp_path, monkeypatch):
+        (tmp_path / '.claude' / '.manifest.json').mkdir(parents=True)
+
+        _run_bootstrap(tmp_path, monkeypatch)
+
+        assert (tmp_path / '.claude' / 'settings.json').is_file()
+        assert (tmp_path / 'CLAUDE.md').is_file()
+
+
 class TestAGitignoreThatIsADirectory:
     def test_the_rest_of_the_upgrade_still_lands(self, tmp_path, monkeypatch):
         theirs = tmp_path / ".gitignore"
