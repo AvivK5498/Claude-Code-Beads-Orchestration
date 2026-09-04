@@ -247,3 +247,85 @@ describe('splitCommandSegments', () => {
     expect(splitCommandSegments('')).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// execCommand argument passing
+// ---------------------------------------------------------------------------
+// An args array combined with `shell: true` is concatenated, not escaped —
+// that is what Node's DEP0190 warns about. Measured on Windows: a space splits
+// one argument into two, quotes are stripped, `^` disappears, `%VAR%` expands,
+// and `&&`, `|`, `>` execute as shell operators. These tests pin the fix down:
+// every argument must reach the program exactly as it was written.
+
+const { spawnSync } = require('child_process');
+
+/** A throwaway script that prints each argv entry on its own line. */
+function makeArgvPrinter() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cp-argv-'));
+  const file = path.join(dir, 'argv-print.js');
+  fs.writeFileSync(file, 'process.argv.slice(2).forEach((a, i) => console.log(i + "=<" + a + ">"));\n');
+  return file;
+}
+
+/** Split output on newlines without caring which line ending the OS used. */
+function lines(out) {
+  return String(out).split(/\r?\n/);
+}
+
+const onWindows = process.platform === 'win32';
+
+describe('execCommand argument passing', () => {
+  // process.execPath is "C:\Program Files\nodejs\node.exe" on Windows, so this
+  // also covers a program whose own path contains a space.
+  const printer = makeArgvPrinter();
+
+  it('keeps an argument containing a space as one argument', () => {
+    expect(lines(execCommand(process.execPath, [printer, 'two words'])))
+      .toEqual(['0=<two words>']);
+  });
+
+  it('does not let shell operators inside an argument run as commands', () => {
+    expect(lines(execCommand(process.execPath, [printer, 'zzz && echo PWNED'])))
+      .toEqual(['0=<zzz && echo PWNED>']);
+    expect(lines(execCommand(process.execPath, [printer, 'zzz | echo PWNED'])))
+      .toEqual(['0=<zzz | echo PWNED>']);
+  });
+
+  it('keeps quotes, carets and percent signs intact', () => {
+    expect(lines(execCommand(process.execPath, [printer, 'say "hi"', 'a^b', '%PATH%'])))
+      .toEqual(['0=<say "hi">', '1=<a^b>', '2=<%PATH%>']);
+  });
+
+  it('finds a repository whose path contains a space', () => {
+    const repo = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cp-space-')), 'dir with space');
+    fs.mkdirSync(repo, { recursive: true });
+    expect(execCommand('git', ['init', '-q', repo])).not.toBeNull();
+
+    const root = execCommand('git', ['-C', repo, 'rev-parse', '--show-toplevel']);
+    expect(root).not.toBeNull();
+    expect(fs.realpathSync(root)).toBe(fs.realpathSync(repo));
+  });
+
+  it('returns null for a program that does not exist', () => {
+    expect(execCommand('cp-no-such-tool-xyz', ['--version'])).toBeNull();
+  });
+
+  // .cmd/.bat wrappers cannot be spawned directly at all (Node refuses with
+  // EINVAL/ENOENT), so they go through cmd.exe. Windows-only by nature.
+  (onWindows ? it : it.skip)('runs a .cmd wrapper and keeps its arguments intact', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cp-wrapper-'));
+    const wrapper = path.join(dir, 'cp-printer.cmd');
+    fs.writeFileSync(wrapper, `@echo off\r\n"${process.execPath}" "${printer}" %*\r\n`);
+
+    const out = execCommand('cp-printer', ['two words', 'zzz && echo PWNED'], {
+      env: { ...process.env, PATH: dir + path.delimiter + process.env.PATH },
+    });
+    expect(lines(out)).toEqual(['0=<two words>', '1=<zzz && echo PWNED>']);
+  });
+
+  it('writes nothing to stderr — no DEP0190 deprecation noise', () => {
+    const script = `require(${JSON.stringify(utilsPath)}).execCommand('git', ['--version']);`;
+    const res = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8' });
+    expect(res.stderr).toBe('');
+  });
+});

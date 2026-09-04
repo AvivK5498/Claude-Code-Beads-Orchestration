@@ -125,9 +125,27 @@ function injectText(text) {
 // External CLI
 // ---------------------------------------------------------------------------
 
+// Programs that turned out to be .cmd/.bat wrappers, so the direct spawn is
+// known to fail for them. A single hook run calls the same tool several times;
+// remember the answer instead of paying for a doomed spawn every time.
+const _needsCmdExe = new Set();
+
 /**
  * Run an external command and return trimmed stdout, or `null` on failure.
- * Uses execFileSync (no shell) to avoid command-injection risks.
+ *
+ * No shell, ever. An args array combined with `shell: true` is NOT escaped —
+ * Node concatenates it into one command line (that is what DEP0190 warns
+ * about). Measured on Windows: a space splits one argument into two, quotes
+ * are stripped, `^` disappears, `%VAR%` expands, and `&&`, `|`, `>` are
+ * executed by the shell. It also breaks ordinary use: `git -C "C:\Users\Ivan
+ * Petrov\repo" status` falls apart on the space, execCommand returns null, and
+ * every check built on the answer silently passes.
+ *
+ * Windows still needs a shell for one case: `.cmd`/`.bat` wrappers (bd and gh
+ * installed through npm) cannot be spawned directly at all — Node refuses with
+ * EINVAL for a full path and ENOENT for a bare name. Those go through
+ * `cmd.exe /d /s /c`, which finds the wrapper on PATH and — unlike
+ * `shell: true` — keeps every argument intact.
  *
  * @param {string}   cmd   - Executable name (e.g. 'git', 'bd', 'gh')
  * @param {string[]} args  - Argument array
@@ -135,26 +153,38 @@ function injectText(text) {
  * @returns {string|null}
  */
 function execCommand(cmd, args, opts) {
+  const options = {
+    encoding: 'utf8',
+    timeout: 10000,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    // Anchor to the project root, not the hook's inherited cwd. Without
+    // this, git/bd/gh answer about whatever directory the Bash tool last
+    // used — a worktree, a subdirectory, or a path outside the repo — and
+    // every check built on the answer silently passes. Callers may still
+    // override via opts.cwd.
+    cwd: getProjectDir(),
+    ...opts,
+  };
+  const viaCmdExe = () => execFileSync('cmd.exe', ['/d', '/s', '/c', cmd, ...args], options);
+
   try {
-    const result = execFileSync(cmd, args, {
-      encoding: 'utf8',
-      timeout: 10000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      // Anchor to the project root, not the hook's inherited cwd. Without
-      // this, git/bd/gh answer about whatever directory the Bash tool last
-      // used — a worktree, a subdirectory, or a path outside the repo — and
-      // every check built on the answer silently passes. Callers may still
-      // override via opts.cwd.
-      cwd: getProjectDir(),
-      // On Windows, npm CLIs (bd, gh) are .cmd wrappers that
-      // execFileSync can't find without shell. Args stay as array
-      // so Node still escapes them properly — no injection risk.
-      shell: process.platform === 'win32',
-      ...opts,
-    });
-    return result.trim();
-  } catch {
-    return null;
+    const direct = _needsCmdExe.has(cmd) ? viaCmdExe() : execFileSync(cmd, args, options);
+    return direct.trim();
+  } catch (err) {
+    // ENOENT/EINVAL here means either "no such program" or "this program is a
+    // wrapper script". Only the second is recoverable, and the two are
+    // indistinguishable, so retry: a genuinely missing program fails again.
+    const mayBeWrapper = process.platform === 'win32' &&
+      !_needsCmdExe.has(cmd) &&
+      (err.code === 'ENOENT' || err.code === 'EINVAL');
+    if (!mayBeWrapper) return null;
+    try {
+      const viaShim = viaCmdExe();
+      _needsCmdExe.add(cmd);
+      return viaShim.trim();
+    } catch {
+      return null;
+    }
   }
 }
 
