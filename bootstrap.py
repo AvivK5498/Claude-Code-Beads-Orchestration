@@ -443,27 +443,39 @@ def save_upgrade(project_dir: Path, relative_path: str, content: str) -> None:
     write_verbatim(dest, content)
 
 
+def _free_spare_slot(dest: Path) -> Path:
+    """A <name>.<timestamp> path next to dest that nothing occupies yet."""
+    stamp, n = _upgrade_timestamp(), 0
+    spare = dest.with_name(f"{dest.name}.{stamp}")
+    while spare.exists():
+        n += 1
+        spare = dest.with_name(f"{dest.name}.{stamp}-{n}")
+    return spare
+
+
 def save_replaced_version(project_dir: Path, rel_key: str, content: str) -> None:
     """Save the version we are about to replace, never overwriting an earlier one.
 
     Our version in .upgrades/<rel> may be a single slot: it ships with the
-    package and can always be had again. The user's cannot, so a .mine that
-    already holds something else is moved aside instead of being written over.
-    Identical content is not saved twice — that would only add noise.
+    package and can always be had again. The user's cannot, so an earlier .mine
+    is copied aside first and only then written over — the order matters, since
+    a step that destroys before its replacement exists can fail in between.
+    Identical content is not saved twice; that would only add noise.
     """
     dest = project_dir / ".claude" / ".upgrades" / (rel_key + ".mine")
-    if dest.exists():
-        try:
-            if read_verbatim(dest) == content:
-                return
-        except Exception:
-            pass  # unreadable: keep it anyway, it is still the user's text
-        stamp, n = _upgrade_timestamp(), 0
-        older = dest.with_name(f"{dest.name}.{stamp}")
-        while older.exists():
-            n += 1
-            older = dest.with_name(f"{dest.name}.{stamp}-{n}")
-        dest.rename(older)
+    if not dest.exists():
+        write_verbatim(dest, content)
+        return
+    try:
+        previous = read_verbatim(dest)
+    except Exception:
+        # Bytes we cannot decode, or a directory. Still the user's, so leave it
+        # exactly where it is and put ours beside it.
+        write_verbatim(_free_spare_slot(dest), content)
+        return
+    if previous == content:
+        return
+    write_verbatim(_free_spare_slot(dest), previous)
     write_verbatim(dest, content)
 
 
@@ -1448,8 +1460,19 @@ def copy_settings_and_claude_md(project_dir: Path, project_name: str,
                     print(f"    rewrote hook path: {old_cmd[:70]}")
             except Exception:
                 if not dry_run:
+                    # Unparseable is not the same as worthless: someone was
+                    # probably editing it. Copy the bytes out before replacing.
+                    try:
+                        kept = (project_dir / ".claude" / ".upgrades"
+                                / "settings.json.before-merge")
+                        kept.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(settings_dest, kept)
+                    except Exception:
+                        pass
                     shutil.copy2(settings_src, settings_dest)
                 print(f"  - {_dry(dry_run)}settings.json (replaced — could not merge)")
+                print(f"    {_dry(dry_run)}Yours saved to: "
+                      ".claude/.upgrades/settings.json.before-merge")
         else:
             if not dry_run:
                 settings_dest.parent.mkdir(parents=True, exist_ok=True)

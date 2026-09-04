@@ -1674,6 +1674,20 @@ class TestSettingsAndClaudeMdSafety:
         assert backup.read_text(encoding="utf-8") == original
         assert "CLAUDE_PROJECT_DIR" in (claude / "settings.json").read_text(encoding="utf-8")
 
+    def test_an_unparseable_settings_json_is_kept_before_replacing_it(self, tmp_path):
+        """Merging is impossible, replacing is fine — losing it silently is not."""
+        claude = tmp_path / ".claude"
+        claude.mkdir()
+        broken = b'{"hooks": {  <- someone was editing this\r\n'
+        (claude / "settings.json").write_bytes(broken)
+
+        copy_settings_and_claude_md(tmp_path, "Demo")
+
+        assert "CLAUDE_PROJECT_DIR" in read_verbatim(claude / "settings.json")
+        kept = claude / ".upgrades" / "settings.json.before-merge"
+        assert kept.exists(), "the file we could not parse was replaced with no copy"
+        assert kept.read_bytes() == broken, "the copy is not byte-for-byte"
+
     def test_existing_claude_md_is_kept_and_template_offered(self, tmp_path):
         """A CLAUDE.md a human has edited is never rewritten — but the current
         template has to reach them somehow."""
@@ -2476,6 +2490,36 @@ class TestReplacedVersionsAccumulate:
         assert contents == {"edit A\n", "edit B\n"}
         assert read_verbatim(
             tmp_path / ".claude" / ".upgrades" / "rules" / "x.md.mine") == "edit B\n"
+
+    def test_a_failed_write_does_not_cost_you_the_older_copy(self, tmp_path, monkeypatch):
+        """Nothing is destroyed before the copy that replaces it exists."""
+        bootstrap.save_replaced_version(tmp_path, "rules/x.md", "edit A\n")
+        mine = tmp_path / ".claude" / ".upgrades" / "rules" / "x.md.mine"
+        real = bootstrap.write_verbatim
+
+        def fail_on_the_spare(path, text):
+            if path != mine:
+                raise PermissionError("locked")
+            return real(path, text)
+
+        monkeypatch.setattr(bootstrap, "write_verbatim", fail_on_the_spare)
+
+        with pytest.raises(PermissionError):
+            bootstrap.save_replaced_version(tmp_path, "rules/x.md", "edit B\n")
+
+        assert read_verbatim(mine) == "edit A\n", "the older copy was destroyed"
+
+    def test_an_unreadable_older_copy_is_left_where_it_is(self, tmp_path):
+        """Bytes we cannot decode are still the user's text — put ours beside them."""
+        mine = tmp_path / ".claude" / ".upgrades" / "rules" / "x.md.mine"
+        mine.parent.mkdir(parents=True)
+        mine.write_bytes(b"\xff\xfe not utf-8 at all")
+
+        bootstrap.save_replaced_version(tmp_path, "rules/x.md", "edit B\n")
+
+        assert mine.read_bytes() == b"\xff\xfe not utf-8 at all"
+        saved = [p for p in mine.parent.iterdir() if p != mine]
+        assert len(saved) == 1 and read_verbatim(saved[0]) == "edit B\n"
 
     def test_the_same_version_twice_leaves_one_file(self, tmp_path):
         bootstrap.save_replaced_version(tmp_path, "rules/x.md", "same\n")
