@@ -11,7 +11,10 @@
 
 const fs = require('fs');
 const path = require('path');
-const { injectText, execCommand, getProjectDir, runHook } = require('./hook-utils.cjs');
+const {
+  injectText, execCommand, getProjectDir, runHook,
+  parseBdVersion, versionBelow, BD_MIN_VERSION,
+} = require('./hook-utils.cjs');
 
 runHook('session-start', () => {
   const projectDir = getProjectDir();
@@ -24,6 +27,7 @@ runHook('session-start', () => {
   const output = [];
   const repoRoot = execCommand('git', ['-C', projectDir, 'rev-parse', '--show-toplevel']);
 
+  collectOutdatedBd(output);
   collectDirtyWarning(repoRoot, output);
   collectMergedWorktrees(projectDir, repoRoot, output);
   collectOpenPrs(output);
@@ -35,6 +39,22 @@ runHook('session-start', () => {
 // ---------------------------------------------------------------------------
 // Sections
 // ---------------------------------------------------------------------------
+
+/**
+ * A bd older than the rules rely on does not announce itself: it fails one
+ * command at a time with "unknown command" in the middle of a task. One line
+ * here is the explanation. Silent when bd cannot be read at all — an
+ * unreadable version is not evidence of an old one.
+ */
+function collectOutdatedBd(output) {
+  const found = parseBdVersion(execCommand('bd', ['version']) || '');
+  if (!versionBelow(found, BD_MIN_VERSION)) return;
+
+  output.push(`WARNING: bd ${found} is older than ${BD_MIN_VERSION}, which the rules rely on`);
+  output.push('   (bd memories, bd remember, bd worktree, bd prime).');
+  output.push('   Update it: npm install -g @beads/bd@latest');
+  output.push('');
+}
 
 /** Uncommitted work in the main checkout means agents would branch off it. */
 function collectDirtyWarning(repoRoot, output) {

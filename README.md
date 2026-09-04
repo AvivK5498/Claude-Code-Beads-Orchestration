@@ -156,6 +156,8 @@ This file is auto-loaded into every agent context. No per-tech supervisor genera
 - Python 3.11+
 - Node.js 20+
 - git
+- [beads CLI](https://github.com/gastownhall/beads#-installation) (`bd`) 1.1.0
+  or newer
 
 ### Install
 
@@ -164,6 +166,18 @@ npx claude-protocol init
 ```
 
 Restart Claude Code. Run `/project-discovery`.
+
+**When `bd` is missing**, the installer prints the command for your machine and
+asks before running it — a global program is your decision. A run nobody can
+answer (CI, a batch upgrade, an agent driving the CLI) installs nothing and
+prints the command instead; `--install-beads` says yes ahead of time. An
+installed `bd` the system still cannot find stops the run: the install
+directory is not on this shell's PATH, so open a new terminal and try again.
+
+**When `bd` is older than 1.1.0**, the installer warns and keeps going, and the
+session-start hook repeats the warning once per session. Nothing is updated for
+you — the rules need `bd memories`, `bd remember`, `bd worktree` and `bd prime`,
+and an old `bd` fails those one at a time with no explanation.
 
 ### Options
 
@@ -175,6 +189,7 @@ Restart Claude Code. Run `/project-discovery`.
 | `--lang en\|ru` | Language for dev rules (default: en) |
 | `--force` | Take our version of every file, no questions asked (yours is kept in `.claude/.upgrades/`) |
 | `--keep-mine` | Keep your version of every file you edited, no questions asked |
+| `--install-beads` | Install the beads CLI without asking (default: ask, and install nothing when nobody can answer) |
 
 ### Local development (before npm publish)
 

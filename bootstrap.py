@@ -38,6 +38,12 @@ _SHELL = sys.platform == "win32"
 SCRIPT_DIR = Path(__file__).parent.resolve()
 TEMPLATES_DIR = SCRIPT_DIR / "templates"
 
+# The oldest beads CLI the rules work against: they call bd memories, bd
+# remember, bd worktree and bd prime. Keep in sync with BD_MIN_VERSION in
+# templates/hooks/hook-utils.cjs — a test asserts the two agree, because two
+# copies of a constant in two languages drift silently.
+BD_MIN_VERSION = "1.1.0"
+
 
 # ============================================================================
 # OBSOLETE ITEMS (per-release cleanup targets)
@@ -1100,56 +1106,24 @@ def run_bd_doctor(project_dir: Path) -> None:
 # STEPS
 # ============================================================================
 
-def install_beads(project_dir: Path, dry_run: bool = False) -> bool:
-    """Install beads CLI and initialize .beads directory."""
+def install_beads(project_dir: Path, dry_run: bool = False,
+                  install_bd: bool = False) -> bool:
+    """Make sure a usable beads CLI is here, then initialize .beads/."""
     print("\n[1/6] Installing beads...")
 
     if dry_run:
-        # A preview writes nothing and shells out to nothing. This step used to
-        # ignore the flag and create .beads/ on the project it was previewing.
-        print("  - beads CLI "
-              + ("already installed" if shutil.which("bd") else "would be installed"))
-        if not (project_dir / ".beads").exists():
-            print("  - [DRY-RUN] would run 'bd init' in this project")
-        print("  - [DRY-RUN] would run 'bd config set export.git-add false'")
-        print("  DONE")
+        _preview_beads(project_dir, install_bd)
         return True
 
-    if not shutil.which("bd"):
-        print("  - beads CLI (bd) not found, installing...")
-        for method, cmd in [
-            ("Homebrew", ["brew", "install", "gastownhall/beads/bd"]),
-            ("npm", ["npm", "install", "-g", "@beads/bd"]),
-            ("go", ["go", "install", "github.com/gastownhall/beads/cmd/bd@latest"]),
-        ]:
-            if shutil.which(cmd[0]):
-                result = subprocess.run(cmd, capture_output=True, text=True, shell=_SHELL)
-                if result.returncode == 0:
-                    print(f"  - Installed via {method}")
-                    break
-        else:
-            print("  ERROR: Could not install beads CLI (bd)")
-            print("  Install manually: https://github.com/gastownhall/beads#-installation")
-            return False
-    else:
+    if shutil.which("bd"):
         print("  - beads CLI already installed")
+    elif not _obtain_bd(install_bd):
+        return False
 
-    beads_dir = project_dir / ".beads"
-    if not beads_dir.exists():
-        print("  - Initializing .beads directory...")
-        try:
-            result = subprocess.run(
-                ["bd", "init"], cwd=project_dir,
-                capture_output=True, text=True, shell=_SHELL,
-                stdin=subprocess.DEVNULL, timeout=15,
-            )
-        except subprocess.TimeoutExpired:
-            result = None
-            print("  - bd init timed out (Dolt server not running?)")
-        if result is None or result.returncode != 0:
-            beads_dir.mkdir(exist_ok=True)
-            (beads_dir / "issues.jsonl").touch()
-            print("  - Created .beads manually (run 'bd init' later with Dolt server running)")
+    warn_if_bd_outdated()
+
+    if not _init_beads_dir(project_dir):
+        return False
 
     # Stop bd's pre-commit shim from force-staging issues.jsonl (bd >=1.0.2
     # defaults export.git-add=true, which re-stages the JSONL on every commit
@@ -1159,6 +1133,201 @@ def install_beads(project_dir: Path, dry_run: bool = False) -> bool:
 
     print("  DONE")
     return True
+
+
+# Ways to install bd, best first. Only the ones this machine has are offered.
+BD_INSTALLERS = [
+    ("Homebrew", ["brew", "install", "gastownhall/beads/bd"]),
+    ("npm", ["npm", "install", "-g", "@beads/bd"]),
+    ("go", ["go", "install", "github.com/gastownhall/beads/cmd/bd@latest"]),
+]
+BD_DOCS_URL = "https://github.com/gastownhall/beads#-installation"
+
+
+def _available_bd_installers() -> list:
+    """The ways to install bd that this machine actually has."""
+    return [(method, cmd) for method, cmd in BD_INSTALLERS if shutil.which(cmd[0])]
+
+
+def _print_bd_install_help() -> None:
+    """Every way we know, for someone who has to do it by hand."""
+    print("  Install the beads CLI yourself, then run this again:")
+    for method, cmd in BD_INSTALLERS:
+        print(f"    {method}: {' '.join(cmd)}")
+    print(f"    docs: {BD_DOCS_URL}")
+
+
+def _ask_to_install_bd(method: str, cmd: list) -> bool:
+    """A global program on someone's machine is their decision, not ours.
+
+    Nobody is there during a batch upgrade, in CI, or when an agent drives the
+    CLI. Those runs install nothing; --install-beads is how to say yes ahead of
+    time.
+    """
+    print("  - beads CLI (bd) not found, and this project needs it.")
+    print(f"    We would install it with {method}: {' '.join(cmd)}")
+    if not _stdin_is_a_person():
+        print("    Nobody is here to answer, so nothing is installed.")
+        print("    Re-run with --install-beads to allow it without asking.")
+        return False
+    while True:
+        try:
+            answer = input("    Install it now? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n    (no answer - nothing installed)")
+            return False
+        if answer in ("", "n", "no"):
+            return False
+        if answer in ("y", "yes"):
+            return True
+        print(f"    '{answer}' is not one of y, n")
+
+
+def _obtain_bd(install_bd: bool) -> bool:
+    """Install bd with consent. True only when bd is callable afterwards."""
+    candidates = _available_bd_installers()
+    if not candidates:
+        print("  ERROR: bd is missing and no package manager we know is available.")
+        _print_bd_install_help()
+        return False
+
+    if not install_bd and not _ask_to_install_bd(*candidates[0]):
+        _print_bd_install_help()
+        return False
+
+    for method, cmd in candidates:
+        result = subprocess.run(cmd, capture_output=True, text=True, shell=_SHELL)
+        if result.returncode == 0:
+            print(f"  - Installed via {method}")
+            break
+        print(f"  - {method} could not install it, trying the next way")
+    else:
+        print("  ERROR: every way we could try failed.")
+        _print_bd_install_help()
+        return False
+
+    # `go install` writes to a directory that is often outside PATH, and a PATH
+    # a package manager just extended is not the PATH of this process. Printing
+    # success here used to hand the next step a bd that is not there.
+    if not shutil.which("bd"):
+        print("  ERROR: bd was installed, but this shell still cannot find it.")
+        print("    The install directory is not on PATH. Open a new terminal")
+        print("    (or add that directory to PATH) and run this again.")
+        return False
+    return True
+
+
+def parse_bd_version(text: str) -> str | None:
+    """First dotted version in `bd version` output: 'bd version 1.1.0 (...)'."""
+    if not text:
+        return None
+    match = re.search(r"\d+\.\d+\.\d+", text)
+    return match.group(0) if match else None
+
+
+def version_below(current: str | None, minimum: str) -> bool:
+    """True when current is older than minimum.
+
+    Anything unreadable is False: a version we cannot parse is not evidence of
+    an old one, and a false alarm every session start is worse than silence.
+    """
+    try:
+        return (tuple(int(p) for p in current.split("."))
+                < tuple(int(p) for p in minimum.split(".")))
+    except (AttributeError, ValueError):
+        return False
+
+
+def read_bd_version() -> str | None:
+    """The installed bd's version, or None when bd cannot answer."""
+    try:
+        result = subprocess.run(
+            ["bd", "version"], capture_output=True, text=True,
+            shell=_SHELL, stdin=subprocess.DEVNULL, timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    return parse_bd_version(result.stdout or result.stderr or "")
+
+
+def warn_if_bd_outdated() -> bool:
+    """Warn about a bd older than the rules rely on. Never blocks.
+
+    An old bd still runs most of the workflow; it just fails one command at a
+    time with "unknown command" and no explanation. This line is the
+    explanation.
+    """
+    found = read_bd_version()
+    if found is None:
+        print("  - could not read the bd version, skipping the version check")
+        return True
+    if version_below(found, BD_MIN_VERSION):
+        print(f"  - WARNING: bd {found} is older than {BD_MIN_VERSION}, which the"
+              " rules rely on (bd memories, bd remember, bd worktree, bd prime)")
+        print("    Update it: npm install -g @beads/bd@latest")
+        return False
+    return True
+
+
+def _init_beads_dir(project_dir: Path) -> bool:
+    """Run `bd init` when there is no .beads/ yet. True when .beads/ is usable."""
+    if (project_dir / ".beads").exists():
+        return True
+
+    print("  - Initializing .beads directory...")
+    try:
+        result = subprocess.run(
+            ["bd", "init"], cwd=project_dir,
+            capture_output=True, text=True, shell=_SHELL,
+            stdin=subprocess.DEVNULL, timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        result = None
+
+    if result is not None and result.returncode == 0:
+        if (project_dir / ".beads").exists():
+            return True
+        # A zero exit code is not the same as a .beads/ in this directory —
+        # `bd init` run inside an existing beads repository reports success and
+        # initializes nothing here. Everything downstream expects it here.
+        print("  ERROR: 'bd init' reported success but left no .beads/ here.")
+        print(f"    Expected: {project_dir / '.beads'}")
+        print("    Run 'bd init' in this directory yourself, then run this again.")
+        return False
+
+    # An empty .beads/ used to be created here so the run could report success.
+    # It cannot: every bd command the rules use fails against it, and the
+    # session-start hook only checks that the directory exists — so the project
+    # looked installed until the first command failed.
+    if result is None:
+        reason = "timed out after 15s (Dolt server not running?)"
+    else:
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        reason = detail[0] if detail else f"exit code {result.returncode}"
+    print(f"  ERROR: 'bd init' failed: {reason}")
+    print("    Run 'bd init' in this project yourself, then run this again.")
+    return False
+
+
+def _preview_beads(project_dir: Path, install_bd: bool) -> None:
+    """What --dry-run says about this step.
+
+    A preview writes nothing and shells out to nothing — not even to read a
+    version, which is why this says what would be checked instead of checking.
+    """
+    if shutil.which("bd"):
+        print("  - beads CLI already installed")
+        print(f"  - [DRY-RUN] would check bd is at least {BD_MIN_VERSION}")
+    elif install_bd:
+        print("  - [DRY-RUN] would install the beads CLI without asking (--install-beads)")
+    else:
+        print("  - [DRY-RUN] would ask before installing the beads CLI")
+    if not (project_dir / ".beads").exists():
+        print("  - [DRY-RUN] would run 'bd init' in this project")
+    print("  - [DRY-RUN] would run 'bd config set export.git-add false'")
+    print("  DONE")
 
 
 def configure_beads_export(project_dir: Path) -> bool:
@@ -1621,7 +1790,7 @@ def _print_cleanup_report(report: dict, dry_run: bool) -> None:
 def bootstrap_project(
     project_dir: Path, project_name: str | None, with_rules: bool,
     lang: str, force: bool, upgrade: bool, dry_run: bool,
-    keep_mine: bool = False,
+    keep_mine: bool = False, install_bd: bool = False,
 ) -> int:
     """Run bootstrap for a single project. Returns exit code (0 = success)."""
     if not dry_run:
@@ -1675,7 +1844,7 @@ def bootstrap_project(
     installer = Installer(project_dir, manifest, force=force, prompt=prompt,
                           dry_run=dry_run)
 
-    if not install_beads(project_dir, dry_run):
+    if not install_beads(project_dir, dry_run, install_bd):
         return 1
 
     copy_agents(resolved_name, installer)
@@ -1806,6 +1975,7 @@ def main():
     parser.add_argument("--keep-mine", dest="keep_mine", action="store_true", help="Keep your version of every file you edited, no questions asked")
     parser.add_argument("--upgrade", action="store_true", help="Run init flow then cleanup obsolete items (uses existing manifest)")
     parser.add_argument("--dry-run", action="store_true", help="Print plan without writing anything")
+    parser.add_argument("--install-beads", dest="install_bd", action="store_true", help="Install the beads CLI without asking (default: ask, and install nothing when nobody can answer)")
     parser.add_argument("--all", dest="all_parent", default=None, metavar="PARENT_DIR", help="Batch upgrade: iterate direct subdirs of PARENT_DIR that contain .beads/. Implies --upgrade.")
     args = parser.parse_args()
 
@@ -1821,6 +1991,7 @@ def main():
         project_dir=project_dir, project_name=args.project_name,
         with_rules=args.with_rules, lang=args.lang, force=args.force,
         upgrade=args.upgrade, dry_run=args.dry_run, keep_mine=args.keep_mine,
+        install_bd=args.install_bd,
     ))
 
 
