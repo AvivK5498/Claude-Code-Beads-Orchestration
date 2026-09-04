@@ -306,21 +306,46 @@ describe('execCommand argument passing', () => {
     expect(fs.realpathSync(root)).toBe(fs.realpathSync(repo));
   });
 
+  // Guards the retry, not the old bug: a failed direct spawn now falls through
+  // to cmd.exe, which must not turn "no such program" into an empty string.
   it('returns null for a program that does not exist', () => {
     expect(execCommand('cp-no-such-tool-xyz', ['--version'])).toBeNull();
   });
 
-  // .cmd/.bat wrappers cannot be spawned directly at all (Node refuses with
-  // EINVAL/ENOENT), so they go through cmd.exe. Windows-only by nature.
-  (onWindows ? it : it.skip)('runs a .cmd wrapper and keeps its arguments intact', () => {
+  /** A .cmd wrapper on PATH that forwards its arguments to the argv printer. */
+  function wrapperOnPath() {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cp-wrapper-'));
-    const wrapper = path.join(dir, 'cp-printer.cmd');
-    fs.writeFileSync(wrapper, `@echo off\r\n"${process.execPath}" "${printer}" %*\r\n`);
+    fs.writeFileSync(path.join(dir, 'cp-printer.cmd'),
+      `@echo off\r\n"${process.execPath}" "${printer}" %*\r\n`);
+    return { env: { ...process.env, PATH: dir + path.delimiter + process.env.PATH } };
+  }
 
-    const out = execCommand('cp-printer', ['two words', 'zzz && echo PWNED'], {
-      env: { ...process.env, PATH: dir + path.delimiter + process.env.PATH },
-    });
-    expect(lines(out)).toEqual(['0=<two words>', '1=<zzz && echo PWNED>']);
+  // .cmd/.bat wrappers cannot be spawned directly at all (Node refuses with
+  // EINVAL/ENOENT), so they are the one case that still goes through cmd.exe —
+  // and therefore the one case where a shell parser sees the arguments.
+  // Windows-only by nature.
+  (onWindows ? it : it.skip)('runs a .cmd wrapper and keeps its arguments intact', () => {
+    const out = execCommand(
+      'cp-printer',
+      ['two words', 'a^b', 'C:\\Users\\R&D\\project', 'say "hi"'],
+      wrapperOnPath(),
+    );
+    expect(lines(out)).toEqual([
+      '0=<two words>', '1=<a^b>', '2=<C:\\Users\\R&D\\project>', '3=<say "hi">',
+    ]);
+  });
+
+  // Node quotes an argument only when it contains whitespace, so a
+  // metacharacter with no spaces around it reaches cmd.exe bare — `x&&echo.>f`
+  // used to run as a second command and really created the file.
+  (onWindows ? it : it.skip)('does not let a .cmd wrapper argument run a second command', () => {
+    const opts = wrapperOnPath();
+    const mark = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cp-mark-')), 'INJECTED.txt');
+
+    const out = execCommand('cp-printer', [`x&&echo.>${mark}`, `y>${mark}`], opts);
+
+    expect(fs.existsSync(mark)).toBe(false);
+    expect(lines(out)).toEqual([`0=<x&&echo.>${mark}>`, `1=<y>${mark}>`]);
   });
 
   it('writes nothing to stderr — no DEP0190 deprecation noise', () => {

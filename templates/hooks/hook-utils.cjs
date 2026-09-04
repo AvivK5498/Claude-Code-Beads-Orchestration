@@ -131,6 +131,37 @@ function injectText(text) {
 const _needsCmdExe = new Set();
 
 /**
+ * Quote one argument for `cmd.exe`. Letting Node do it is not enough: Node
+ * quotes an argument only when it contains whitespace, so `x&&whoami` arrives
+ * bare and cmd.exe runs it as a second command (measured — an argument built
+ * that way really did create a file). Inside double quotes cmd.exe treats
+ * `&`, `|`, `<`, `>` and `^` as ordinary characters, and the callee's C
+ * runtime strips the quotes again, so the program sees what the caller wrote.
+ *
+ * `%VAR%` is the one thing quoting cannot stop — cmd.exe expands it before it
+ * looks at quotes. That substitutes an environment value into an argument; it
+ * cannot start a command, and this path only ever runs .cmd wrappers.
+ */
+function quoteForCmdExe(arg) {
+  // A backslash is only special in front of a quote, so double those runs —
+  // the trailing run included, since the closing quote follows it.
+  const escaped = String(arg).replace(/(\\*)"/g, '$1$1\\"').replace(/(\\*)$/, '$1$1');
+  return `"${escaped}"`;
+}
+
+/** Run a command through cmd.exe — the only way to reach a .cmd/.bat wrapper. */
+function runViaCmdExe(cmd, args, options) {
+  // `/s` makes cmd.exe strip exactly the outermost pair of quotes and take the
+  // rest literally, which is why the whole command goes inside one more pair.
+  // windowsVerbatimArguments stops Node from re-quoting what is already quoted.
+  const line = [cmd, ...args].map(quoteForCmdExe).join(' ');
+  return execFileSync('cmd.exe', ['/d', '/s', '/c', `"${line}"`], {
+    ...options,
+    windowsVerbatimArguments: true,
+  });
+}
+
+/**
  * Run an external command and return trimmed stdout, or `null` on failure.
  *
  * No shell, ever. An args array combined with `shell: true` is NOT escaped —
@@ -144,8 +175,7 @@ const _needsCmdExe = new Set();
  * Windows still needs a shell for one case: `.cmd`/`.bat` wrappers (bd and gh
  * installed through npm) cannot be spawned directly at all — Node refuses with
  * EINVAL for a full path and ENOENT for a bare name. Those go through
- * `cmd.exe /d /s /c`, which finds the wrapper on PATH and — unlike
- * `shell: true` — keeps every argument intact.
+ * `cmd.exe /d /s /c` with arguments quoted by quoteForCmdExe below.
  *
  * @param {string}   cmd   - Executable name (e.g. 'git', 'bd', 'gh')
  * @param {string[]} args  - Argument array
@@ -165,10 +195,10 @@ function execCommand(cmd, args, opts) {
     cwd: getProjectDir(),
     ...opts,
   };
-  const viaCmdExe = () => execFileSync('cmd.exe', ['/d', '/s', '/c', cmd, ...args], options);
-
   try {
-    const direct = _needsCmdExe.has(cmd) ? viaCmdExe() : execFileSync(cmd, args, options);
+    const direct = _needsCmdExe.has(cmd)
+      ? runViaCmdExe(cmd, args, options)
+      : execFileSync(cmd, args, options);
     return direct.trim();
   } catch (err) {
     // ENOENT/EINVAL here means either "no such program" or "this program is a
@@ -179,7 +209,7 @@ function execCommand(cmd, args, opts) {
       (err.code === 'ENOENT' || err.code === 'EINVAL');
     if (!mayBeWrapper) return null;
     try {
-      const viaShim = viaCmdExe();
+      const viaShim = runViaCmdExe(cmd, args, options);
       _needsCmdExe.add(cmd);
       return viaShim.trim();
     } catch {
