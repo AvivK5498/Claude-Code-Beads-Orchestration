@@ -3146,3 +3146,81 @@ class TestClaudeMdDryRunWritesNothing:
         after = _snapshot(tmp_path)
         assert after == before
         assert ("CLAUDE.md" in manifest.get("regions", {})) is (kind == "installed")
+
+
+# ============================================================================
+# Plugin manifests
+# ============================================================================
+# The repository is both a marketplace and the plugin it lists: .claude-plugin/
+# holds marketplace.json and plugin.json side by side, and the plugin manifest
+# points at directories that already exist (templates/agents, templates/hooks)
+# rather than a second copy of them. Two copies of a hook would drift.
+
+REPO_ROOT = bootstrap.SCRIPT_DIR
+PLUGIN_DIR = REPO_ROOT / ".claude-plugin"
+
+
+def _read_json(path):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+class TestPluginManifests:
+    def test_both_manifests_parse(self):
+        assert _read_json(PLUGIN_DIR / "marketplace.json")["name"] == "claude-protocol"
+        assert _read_json(PLUGIN_DIR / "plugin.json")["name"] == "claude-protocol"
+
+    def test_the_marketplace_lists_this_repository_as_the_plugin(self):
+        entries = _read_json(PLUGIN_DIR / "marketplace.json")["plugins"]
+
+        assert len(entries) == 1
+        assert entries[0]["source"] == "./"
+
+    def test_one_version_in_three_places(self):
+        """A marketplace entry whose version does not grow leaves every user on
+        the copy in their cache, so the three files have to move together."""
+        pkg = _read_json(REPO_ROOT / "package.json")["version"]
+        market = _read_json(PLUGIN_DIR / "marketplace.json")
+
+        assert _read_json(PLUGIN_DIR / "plugin.json")["version"] == pkg
+        assert market["metadata"]["version"] == pkg
+        assert market["plugins"][0]["version"] == pkg
+
+    @pytest.mark.parametrize("key", ["agents", "skills", "hooks"])
+    def test_every_declared_path_exists(self, key):
+        declared = _read_json(PLUGIN_DIR / "plugin.json")[key]
+        paths = declared if isinstance(declared, list) else [declared]
+
+        for path in paths:
+            assert (REPO_ROOT / path).exists(), \
+                f"plugin.json points {key} at {path}, which is not there"
+
+    def test_the_manifest_lists_every_agent_we_ship(self):
+        """`claude plugin validate` rejects a directory here, so agents are
+        listed one file at a time — and a new agent is then one edit away from
+        shipping through npx and not through the plugin."""
+        declared = {Path(p).name
+                    for p in _read_json(PLUGIN_DIR / "plugin.json")["agents"]}
+        on_disk = {p.name for p in (REPO_ROOT / "templates" / "agents").glob("*.md")}
+
+        assert declared == on_disk, "plugin.json and templates/agents disagree"
+
+    def test_hooks_json_runs_files_that_are_there(self):
+        hooks = _read_json(REPO_ROOT / "hooks" / "hooks.json")["hooks"]
+
+        assert set(hooks) == {"PreToolUse", "SubagentStop", "SessionStart"}
+        for groups in hooks.values():
+            for group in groups:
+                for hook in group["hooks"]:
+                    command = hook["command"]
+                    found = re.search(r"\$\{CLAUDE_PLUGIN_ROOT\}/([^\"]+)", command)
+                    assert found, f"hook command without a plugin root: {command}"
+                    assert (REPO_ROOT / found.group(1)).exists(), \
+                        f"hooks.json runs {found.group(1)}, which is not there"
+
+    def test_the_package_ships_what_the_plugin_needs(self):
+        """A plugin installed from npm is the published package: a directory
+        left out of `files` simply is not there."""
+        shipped = _read_json(REPO_ROOT / "package.json")["files"]
+
+        for needed in (".claude-plugin/", "hooks/", "templates/"):
+            assert needed in shipped, f"package.json does not ship {needed}"
