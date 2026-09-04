@@ -2193,6 +2193,54 @@ class TestClaudeMdAsksBeforeTouchingYourEdits:
 
         assert read_verbatim(tmp_path / "CLAUDE.md") == LEGACY_CLAUDE_MD
 
+    def test_markers_without_a_recorded_hash_are_a_question(self, tmp_path, monkeypatch):
+        """Markers alone do not prove the block is ours.
+
+        The manifest can be lost, unreadable or hand-edited, and a file can
+        quote both marker strings in its own prose. Replacing what sits between
+        them on that evidence deletes text nobody agreed to lose.
+        """
+        manifest = _installed_project(tmp_path)
+        del manifest["claude_md_block"]
+        asked = []
+        monkeypatch.setattr("builtins.input", lambda _: asked.append(1) or "k")
+
+        update_claude_md(tmp_path, _template_text(), manifest,
+                         bootstrap.ConflictPrompt(interactive=True))
+
+        assert asked, "replaced a block we have no record of installing"
+        assert "what 3.7 shipped" in read_verbatim(tmp_path / "CLAUDE.md")
+
+    def test_prose_quoting_the_markers_is_not_gutted(self, tmp_path, monkeypatch):
+        """A 'how upgrades work' section mentioning both markers is still text."""
+        write_verbatim(tmp_path / "CLAUDE.md",
+                       "# Demo\n\n## How upgrades work\n\n"
+                       "Our block starts at <!-- claude-protocol:begin --> and\n"
+                       "runs to <!-- claude-protocol:end -->, and nothing else moves.\n")
+        (tmp_path / ".claude").mkdir(exist_ok=True)
+        monkeypatch.setattr("builtins.input", _explode)
+
+        update_claude_md(tmp_path, _template_text(), {"files": {}},
+                         bootstrap.ConflictPrompt(interactive=False))
+
+        text = read_verbatim(tmp_path / "CLAUDE.md")
+        assert "runs to <!-- claude-protocol:end -->, and nothing else moves." in text
+
+    def test_an_unreadable_manifest_does_not_cost_you_the_block(self, tmp_path, monkeypatch):
+        """load_manifest swallows a parse error and returns an empty manifest."""
+        monkeypatch.setattr(bootstrap, "install_beads", lambda pd: True)
+        monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda pd: None)
+        monkeypatch.setattr("builtins.input", _explode)
+        _installed_project(tmp_path, block="## Your Identity\n\nMY OWN RULE: no Friday deploys.\n")
+        (tmp_path / ".claude" / ".manifest.json").write_text("{ broken", encoding="utf-8")
+
+        bootstrap.bootstrap_project(
+            project_dir=tmp_path, project_name="Demo", with_rules=True,
+            lang="en", force=False, upgrade=False, dry_run=False, keep_mine=True,
+        )
+
+        assert "MY OWN RULE" in read_verbatim(tmp_path / "CLAUDE.md")
+
     def test_force_marks_the_block_without_asking(self, tmp_path, monkeypatch):
         """--force answers 'take ours' in advance, for CLAUDE.md too."""
         monkeypatch.setattr(bootstrap, "install_beads", lambda pd: True)

@@ -455,7 +455,8 @@ CLAUDE_MD_UNMARKED = PromptWording(
 )
 
 CLAUDE_MD_EDITED = PromptWording(
-    headline="CLAUDE.md — you edited inside our marked block, and it has a new version.",
+    headline=("CLAUDE.md — what sits between our markers is not what we installed:\n"
+              "    either it was edited, or we have no record of installing it."),
     keep="keep your block  (ours goes to .claude/.upgrades/CLAUDE.md)",
     take="take our block   (yours goes to .claude/.upgrades/CLAUDE.md.mine)",
 )
@@ -1101,7 +1102,7 @@ def copy_rules_and_skills(
         else:
             skipped.append(rel_key)
             print(f"  - rules/beads-workflow.md (yours kept)")
-            print(f"    Ours saved to: .claude/.upgrades/{rel_key}")
+            print(f"    {_dry(dry_run)}Ours saved to: .claude/.upgrades/{rel_key}")
 
     # Optional dev rules (from language-specific directory)
     if with_rules:
@@ -1125,7 +1126,7 @@ def copy_rules_and_skills(
                 else:
                     skipped.append(rel_key)
                     print(f"  - rules/{rule_file.name} (yours kept)")
-                    print(f"    Ours saved to: .claude/.upgrades/{rel_key}")
+                    print(f"    {_dry(dry_run)}Ours saved to: .claude/.upgrades/{rel_key}")
 
     # Project discovery skill (always overwrite — our code)
     skills_dir = project_dir / ".claude" / "skills"
@@ -1257,14 +1258,16 @@ def _claude_md_proposal(current: str, region: str) -> tuple:
 def _block_is_ours(current: str, manifest: dict) -> bool:
     """True when the marked region is what we last installed, byte for byte.
 
-    No recorded hash means the markers were put there by hand — and the marker
-    itself says that what it wraps is ours to replace.
+    Only a recorded hash proves that. Without one the markers could be anything
+    — a lost or unreadable manifest, a pair typed by hand, a file whose prose
+    quotes both marker strings — and replacing what sits between them would
+    delete text nobody agreed to lose. So: no hash, no silent replacement.
     """
     span = marked_span(current)
-    if not span:
-        return False
     recorded = manifest.get("claude_md_block")
-    return not recorded or content_sha256(_lf(current[span[0]:span[1]])) == recorded
+    if not span or not recorded:
+        return False
+    return content_sha256(_lf(current[span[0]:span[1]])) == recorded
 
 
 def _write_claude_md(dest: Path, text: str, region: str, manifest: dict,
@@ -1536,7 +1539,7 @@ def bootstrap_project(
         print(f"\n  {len(all_skipped)} file(s) kept as yours:")
         for rel in all_skipped:
             print(f"    - {rel}")
-            print(f"      Ours is next to it: .claude/.upgrades/{rel}")
+            print(f"      {_dry(dry_run)}Ours is next to it: .claude/.upgrades/{rel}")
         print("    Re-run with --force to take ours for all of them.")
 
     # Post-upgrade health check — never fatal
