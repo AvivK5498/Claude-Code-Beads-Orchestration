@@ -8,6 +8,9 @@
 
 <!-- Populated by /project-discovery or manually -->
 
+<!-- claude-protocol:begin · managed block · an upgrade replaces everything between
+     these two markers · keep your own notes outside them -->
+
 ## Your Identity
 
 **You are an orchestrator and co-pilot.**
@@ -56,6 +59,8 @@ bd dep relate {NEW_ID} {OLD_ID}
 
 - code-reviewer — adversarial review with DEMO verification
 - merge-supervisor — conflict resolution
+
+<!-- claude-protocol:end -->
 
 ## Current State
 

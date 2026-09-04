@@ -37,6 +37,12 @@ from bootstrap import (
     _has_existing_install,
     copy_settings_and_claude_md,
     copy_rules_and_skills,
+    marked_span,
+    unmarked_span,
+    splice,
+    update_claude_md,
+    read_verbatim,
+    write_verbatim,
     _hook_basename,
     _entry_key,
     canonical_hook_commands,
@@ -1907,3 +1913,343 @@ class TestDryRunWritesNothing:
         assert "[DRY-RUN] settings.json" in out
         assert "[DRY-RUN] rules/beads-workflow.md" in out
         assert "[DRY-RUN] CLAUDE.md" in out
+
+    def test_a_modified_rule_leaves_no_upgrade_file(self, tmp_path):
+        """Saving the losing version is a write too, and a preview makes none."""
+        manifest = _modified_rule(tmp_path)
+
+        copy_rules_and_skills(tmp_path, True, "en", manifest, False,
+                              bootstrap.ConflictPrompt(interactive=False), True)
+
+        assert not (tmp_path / ".claude" / ".upgrades").exists()
+
+
+# ============================================================================
+# CLAUDE.md — our block, and only our block
+# ============================================================================
+# CLAUDE.md carries the project overview, the tech stack and the current state,
+# so it is never overwritten wholesale. Until now that also meant our
+# instructions inside it were never updated: the template landed in .upgrades/
+# and a human merged it by hand. Markers make the replacement automatic and
+# bounded — everything outside them is not ours to touch.
+
+
+LEGACY_CLAUDE_MD = """# Demo
+
+## Project Overview
+
+We sell widgets, and only this file says so.
+
+## Tech Stack
+
+- Rust
+
+## Your Identity
+
+**You are an orchestrator and co-pilot.**
+
+- wording from 3.5 that nobody ships any more
+
+## Workflow
+
+old workflow text
+
+### Quick Fix (<10 lines, feature branch only)
+
+branch off main first
+
+## Investigation Before Delegation
+
+lead with evidence
+
+## Bug Fixes & Follow-Up
+
+closed beads stay closed
+
+## Agents
+
+- code-reviewer
+
+## Current State
+
+Mid-migration, and this sentence must survive.
+"""
+
+
+def _explode(_):
+    raise AssertionError("asked a question that nobody should have been asked")
+
+
+def _template_text(name="Demo"):
+    return read_verbatim(TEMPLATES_DIR / "CLAUDE.md").replace("[Project]", name)
+
+
+def _template_region():
+    text = _template_text()
+    start, end = marked_span(text)
+    return text[start:end]
+
+
+def _installed_project(tmp_path, block="## Your Identity\n\nwhat 3.7 shipped\n"):
+    """A CLAUDE.md we installed and nobody has edited since."""
+    region = ("<!-- claude-protocol:begin · managed block -->\n\n"
+              + block + "\n<!-- claude-protocol:end -->")
+    write_verbatim(tmp_path / "CLAUDE.md",
+                   "# Demo\n\n## Project Overview\n\nWe sell widgets.\n\n"
+                   + region + "\n\n## Current State\n\nMid-migration.\n")
+    (tmp_path / ".claude").mkdir(exist_ok=True)
+    return {"files": {}, "claude_md_block": content_sha256(region)}
+
+
+class TestClaudeMdSpans:
+    def test_marked_span_covers_both_markers(self):
+        text = ("before\n<!-- claude-protocol:begin -->\nours\n"
+                "<!-- claude-protocol:end -->\nafter\n")
+        start, end = marked_span(text)
+        assert text[start:end] == ("<!-- claude-protocol:begin -->\nours\n"
+                                   "<!-- claude-protocol:end -->")
+
+    def test_marked_span_is_none_without_markers(self):
+        assert marked_span("just a file\n") is None
+
+    def test_marked_span_needs_the_closing_marker(self):
+        """Half a pair is not a block — falling back beats guessing an end."""
+        assert marked_span("<!-- claude-protocol:begin -->\nours\n") is None
+
+    def test_the_shipped_template_carries_the_markers(self):
+        region = _template_region()
+        assert "## Your Identity" in region and "## Agents" in region
+        assert "## Project Overview" not in region, "the user's own section is inside ours"
+        assert "## Current State" not in region, "the user's own section is inside ours"
+
+    def test_unmarked_span_finds_a_v3_block(self):
+        start, end = unmarked_span(LEGACY_CLAUDE_MD)
+        block = LEGACY_CLAUDE_MD[start:end]
+        assert block.startswith("## Your Identity")
+        assert block.endswith("- code-reviewer\n")
+        assert "We sell widgets" not in block
+        assert "Mid-migration" not in block
+
+    def test_unmarked_span_stops_at_a_foreign_heading(self):
+        """A section the user put between ours must never be swallowed."""
+        text = "## Your Identity\n\nours\n\n## Deployment\n\nmine\n\n## Agents\n\nours\n"
+        start, end = unmarked_span(text)
+        assert text[start:end] == "## Your Identity\n\nours\n"
+
+    def test_unmarked_span_keeps_level_three_headings_inside(self):
+        start, end = unmarked_span(LEGACY_CLAUDE_MD)
+        assert "### Quick Fix" in LEGACY_CLAUDE_MD[start:end]
+
+    def test_unmarked_span_is_none_without_our_first_heading(self):
+        assert unmarked_span("# Mine\n\n## Workflow\n\nbeads all the way\n") is None
+
+    def test_splice_keeps_crlf(self):
+        text = ("a\r\n<!-- claude-protocol:begin -->\r\nold\r\n"
+                "<!-- claude-protocol:end -->\r\nb\r\n")
+        out = splice(text, marked_span(text),
+                     "<!-- claude-protocol:begin -->\nnew\n<!-- claude-protocol:end -->")
+        assert "new" in out
+        assert "\n" not in out.replace("\r\n", ""), "a lone LF crept into a CRLF file"
+
+    def test_splice_keeps_lf(self):
+        text = "a\n<!-- claude-protocol:begin -->\nold\n<!-- claude-protocol:end -->\nb\n"
+        out = splice(text, marked_span(text),
+                     "<!-- claude-protocol:begin -->\r\nnew\r\n<!-- claude-protocol:end -->")
+        assert "\r" not in out, "a CR crept into an LF file"
+
+
+class TestClaudeMdBlockIsRefreshed:
+    def test_a_new_file_gets_the_markers_and_is_recorded(self, tmp_path):
+        manifest = {"files": {}}
+
+        update_claude_md(tmp_path, _template_text(), manifest)
+
+        assert marked_span(read_verbatim(tmp_path / "CLAUDE.md")) is not None
+        assert manifest["claude_md_block"] == content_sha256(_template_region())
+
+    def test_the_block_is_refreshed_without_a_question(self, tmp_path, monkeypatch):
+        manifest = _installed_project(tmp_path)
+        monkeypatch.setattr("builtins.input", _explode)
+
+        update_claude_md(tmp_path, _template_text(), manifest,
+                         bootstrap.ConflictPrompt(interactive=True))
+
+        text = read_verbatim(tmp_path / "CLAUDE.md")
+        assert "what 3.7 shipped" not in text
+        assert "**You are an orchestrator and co-pilot.**" in text
+        assert manifest["claude_md_block"] == content_sha256(_template_region())
+
+    def test_the_users_own_text_is_left_alone(self, tmp_path):
+        manifest = _installed_project(tmp_path)
+
+        update_claude_md(tmp_path, _template_text(), manifest)
+
+        text = read_verbatim(tmp_path / "CLAUDE.md")
+        assert text.startswith("# Demo\n\n## Project Overview\n\nWe sell widgets.\n\n")
+        assert text.endswith("\n\n## Current State\n\nMid-migration.\n")
+
+    def test_a_crlf_file_stays_crlf(self, tmp_path):
+        manifest = _installed_project(tmp_path)
+        path = tmp_path / "CLAUDE.md"
+        write_verbatim(path, read_verbatim(path).replace("\n", "\r\n"))
+
+        update_claude_md(tmp_path, _template_text(), manifest)
+
+        text = read_verbatim(path)
+        assert "**You are an orchestrator and co-pilot.**" in text
+        assert "\n" not in text.replace("\r\n", ""), "the file was flipped to LF"
+
+    def test_appending_writes_only_our_block(self, tmp_path):
+        write_verbatim(tmp_path / "CLAUDE.md", "# Demo\n\n## Build\n\nmake all\n")
+        manifest = {"files": {}}
+
+        update_claude_md(tmp_path, _template_text(), manifest)
+
+        text = read_verbatim(tmp_path / "CLAUDE.md")
+        assert "## Build" in text and "# Beads Orchestration" in text
+        assert marked_span(text) is not None
+        assert "## Tech Stack" not in text, "the template's own sections leaked in"
+        assert manifest["claude_md_block"] == content_sha256(_template_region())
+
+
+class TestClaudeMdAsksBeforeTouchingYourEdits:
+    def _edited_inside(self, tmp_path):
+        manifest = _installed_project(tmp_path)
+        path = tmp_path / "CLAUDE.md"
+        write_verbatim(path, read_verbatim(path).replace(
+            "what 3.7 shipped", "what 3.7 shipped, plus a rule I added"))
+        return manifest
+
+    def _legacy(self, tmp_path):
+        write_verbatim(tmp_path / "CLAUDE.md", LEGACY_CLAUDE_MD)
+        (tmp_path / ".claude").mkdir(exist_ok=True)
+        return {"files": {}}
+
+    def test_an_edit_inside_the_block_is_a_question(self, tmp_path, monkeypatch):
+        manifest = self._edited_inside(tmp_path)
+        asked = []
+        monkeypatch.setattr("builtins.input", lambda _: asked.append(1) or "k")
+
+        update_claude_md(tmp_path, _template_text(), manifest,
+                         bootstrap.ConflictPrompt(interactive=True))
+
+        assert asked, "an edited block was replaced without asking"
+        assert "plus a rule I added" in read_verbatim(tmp_path / "CLAUDE.md")
+
+    def test_keeping_your_block_saves_ours_beside_it(self, tmp_path, monkeypatch):
+        manifest = self._edited_inside(tmp_path)
+        monkeypatch.setattr("builtins.input", lambda _: "k")
+
+        update_claude_md(tmp_path, _template_text(), manifest,
+                         bootstrap.ConflictPrompt(interactive=True))
+
+        ours = read_verbatim(tmp_path / ".claude" / ".upgrades" / "CLAUDE.md")
+        assert "**You are an orchestrator and co-pilot.**" in ours
+        assert "We sell widgets." in ours, "the offer dropped the user's own sections"
+
+    def test_taking_our_block_saves_your_whole_file(self, tmp_path, monkeypatch):
+        manifest = self._edited_inside(tmp_path)
+        monkeypatch.setattr("builtins.input", lambda _: "t")
+
+        update_claude_md(tmp_path, _template_text(), manifest,
+                         bootstrap.ConflictPrompt(interactive=True))
+
+        text = read_verbatim(tmp_path / "CLAUDE.md")
+        assert "plus a rule I added" not in text
+        assert "We sell widgets." in text and "Mid-migration." in text
+        mine = read_verbatim(tmp_path / ".claude" / ".upgrades" / "CLAUDE.md.mine")
+        assert "plus a rule I added" in mine
+        assert manifest["claude_md_block"] == content_sha256(_template_region())
+
+    def test_an_unmarked_block_asks_before_marking(self, tmp_path, monkeypatch):
+        manifest = self._legacy(tmp_path)
+        monkeypatch.setattr("builtins.input", lambda _: "t")
+
+        update_claude_md(tmp_path, _template_text(), manifest,
+                         bootstrap.ConflictPrompt(interactive=True))
+
+        text = read_verbatim(tmp_path / "CLAUDE.md")
+        assert marked_span(text) is not None
+        assert "wording from 3.5" not in text
+        assert "We sell widgets, and only this file says so." in text
+        assert "Mid-migration, and this sentence must survive." in text
+
+    def test_refusing_to_mark_leaves_the_file_alone(self, tmp_path, monkeypatch):
+        manifest = self._legacy(tmp_path)
+        monkeypatch.setattr("builtins.input", lambda _: "k")
+
+        update_claude_md(tmp_path, _template_text(), manifest,
+                         bootstrap.ConflictPrompt(interactive=True))
+
+        assert read_verbatim(tmp_path / "CLAUDE.md") == LEGACY_CLAUDE_MD
+        assert (tmp_path / ".claude" / ".upgrades" / "CLAUDE.md").exists()
+
+    def test_no_terminal_never_asks_and_keeps_your_file(self, tmp_path, monkeypatch):
+        manifest = self._legacy(tmp_path)
+        monkeypatch.setattr("builtins.input", _explode)
+
+        update_claude_md(tmp_path, _template_text(), manifest,
+                         bootstrap.ConflictPrompt(interactive=False))
+
+        assert read_verbatim(tmp_path / "CLAUDE.md") == LEGACY_CLAUDE_MD
+
+    def test_force_marks_the_block_without_asking(self, tmp_path, monkeypatch):
+        """--force answers 'take ours' in advance, for CLAUDE.md too."""
+        monkeypatch.setattr(bootstrap, "install_beads", lambda pd: True)
+        monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda pd: None)
+        monkeypatch.setattr("builtins.input", _explode)
+        write_verbatim(tmp_path / "CLAUDE.md", LEGACY_CLAUDE_MD)
+
+        bootstrap.bootstrap_project(
+            project_dir=tmp_path, project_name="Demo", with_rules=True,
+            lang="en", force=True, upgrade=False, dry_run=False,
+        )
+
+        text = read_verbatim(tmp_path / "CLAUDE.md")
+        assert marked_span(text) is not None
+        assert "Mid-migration, and this sentence must survive." in text
+        assert load_manifest(tmp_path).get("claude_md_block")
+
+    def test_keep_mine_leaves_the_block_unmarked(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bootstrap, "install_beads", lambda pd: True)
+        monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda pd: None)
+        monkeypatch.setattr("builtins.input", _explode)
+        write_verbatim(tmp_path / "CLAUDE.md", LEGACY_CLAUDE_MD)
+
+        bootstrap.bootstrap_project(
+            project_dir=tmp_path, project_name="Demo", with_rules=True,
+            lang="en", force=False, upgrade=False, dry_run=False,
+            keep_mine=True,
+        )
+
+        assert read_verbatim(tmp_path / "CLAUDE.md") == LEGACY_CLAUDE_MD
+
+
+class TestClaudeMdDryRunWritesNothing:
+    def _start(self, tmp_path, kind):
+        if kind == "installed":
+            return _installed_project(tmp_path)
+        if kind == "legacy":
+            write_verbatim(tmp_path / "CLAUDE.md", LEGACY_CLAUDE_MD)
+        elif kind == "plain":
+            write_verbatim(tmp_path / "CLAUDE.md", "# Demo\n\n## Build\n\nmake all\n")
+        elif kind == "unknown":
+            write_verbatim(tmp_path / "CLAUDE.md",
+                           "# Mine\n\n## Workflow\n\nbeads all the way\n")
+        return {"files": {}}
+
+    @pytest.mark.parametrize("kind",
+                             ["missing", "installed", "legacy", "plain", "unknown"])
+    def test_every_path_writes_nothing(self, tmp_path, monkeypatch, kind):
+        manifest = self._start(tmp_path, kind)
+        monkeypatch.setattr("builtins.input", _explode)
+        before = {str(f.relative_to(tmp_path)): f.read_bytes()
+                  for f in tmp_path.rglob("*") if f.is_file()}
+
+        update_claude_md(tmp_path, _template_text(), manifest,
+                         bootstrap.ConflictPrompt(interactive=False), dry_run=True)
+
+        after = {str(f.relative_to(tmp_path)): f.read_bytes()
+                 for f in tmp_path.rglob("*") if f.is_file()}
+        assert after == before
+        assert "claude_md_block" not in manifest or kind == "installed"

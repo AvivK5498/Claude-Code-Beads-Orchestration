@@ -25,6 +25,7 @@ import difflib
 import hashlib
 import shutil
 import subprocess
+from collections import namedtuple
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -350,6 +351,24 @@ def copy_and_replace(source: Path, dest: Path, replacements: dict) -> None:
     dest.write_text(content, encoding='utf-8')
 
 
+def read_verbatim(path: Path) -> str:
+    """Read a text file without translating its line endings.
+
+    Path.read_text() turns CRLF into LF. Writing that back on Windows turns it
+    into CRLF again — a whole-file diff for a two-line edit. Every read that
+    feeds an edit-in-place goes through here.
+    """
+    with open(path, "r", encoding="utf-8", newline="") as f:
+        return f.read()
+
+
+def write_verbatim(path: Path, text: str) -> None:
+    """Write text exactly as given — no newline translation on any platform."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+
+
 # ============================================================================
 # MANIFEST (upgrade tracking)
 # ============================================================================
@@ -413,8 +432,33 @@ def should_update_file(
 def save_upgrade(project_dir: Path, relative_path: str, content: str) -> None:
     """Save new version of a user-modified file to .claude/.upgrades/."""
     dest = project_dir / ".claude" / ".upgrades" / relative_path
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(content, encoding="utf-8")
+    write_verbatim(dest, content)
+
+
+PromptWording = namedtuple("PromptWording", "headline keep take")
+
+# Most conflicts are "you edited this file and we ship a new one". CLAUDE.md is
+# not one of those: only a marked block inside it belongs to us, so the same
+# k/t/d/K/T question needs different words.
+FILE_CONFLICT = PromptWording(
+    headline="{rel} — you edited this file, and this version ships a new one.",
+    keep="keep yours (ours goes to .claude/.upgrades/{rel})",
+    take="take ours  (yours goes to .claude/.upgrades/{rel}.mine)",
+)
+
+CLAUDE_MD_UNMARKED = PromptWording(
+    headline=("CLAUDE.md — our instructions are in there unmarked.\n"
+              "    Marking them lets every upgrade refresh just that block and "
+              "leave the rest of your file alone."),
+    keep="leave it alone   (ours goes to .claude/.upgrades/CLAUDE.md)",
+    take="mark and update  (yours goes to .claude/.upgrades/CLAUDE.md.mine)",
+)
+
+CLAUDE_MD_EDITED = PromptWording(
+    headline="CLAUDE.md — you edited inside our marked block, and it has a new version.",
+    keep="keep your block  (ours goes to .claude/.upgrades/CLAUDE.md)",
+    take="take our block   (yours goes to .claude/.upgrades/CLAUDE.md.mine)",
+)
 
 
 class ConflictPrompt:
@@ -442,13 +486,15 @@ class ConflictPrompt:
     def will_ask(self) -> bool:
         return self._interactive and self._sticky is None
 
-    def ask(self, rel_key: str, current: Path, new_text: str) -> str:
+    def ask(self, rel_key: str, current: Path, new_text: str,
+            wording: PromptWording = None) -> str:
         """Return KEEP or TAKE for one file."""
         if self._sticky:
             return self._sticky
-        print(f"\n  {rel_key} — you edited this file, and this version ships a new one.")
-        print(f"    k  keep yours (ours goes to .claude/.upgrades/{rel_key})")
-        print(f"    t  take ours  (yours goes to .claude/.upgrades/{rel_key}.mine)")
+        wording = wording or FILE_CONFLICT
+        print(f"\n  {wording.headline.format(rel=rel_key)}")
+        print(f"    k  {wording.keep.format(rel=rel_key)}")
+        print(f"    t  {wording.take.format(rel=rel_key)}")
         print("    d  show what changed")
         print("    K  keep yours for every remaining file")
         print("    T  take ours for every remaining file")
@@ -503,22 +549,26 @@ def _stdin_is_a_person() -> bool:
 
 
 def _resolve_modified(prompt, project_dir: Path, rel_key: str, dest: Path,
-                      new_text: str) -> bool:
+                      new_text: str, *, wording: PromptWording = None,
+                      dry_run: bool = False) -> bool:
     """Ask (or apply the standing answer). True → write ours over theirs.
 
     Whichever way it goes, the version that loses is preserved under
-    .claude/.upgrades/ — an upgrade never destroys text a person wrote.
+    .claude/.upgrades/ — an upgrade never destroys text a person wrote. Except
+    in a dry run: saving the loser is itself a write, and a preview writes
+    nothing at all.
     """
     if prompt is None:
         prompt = ConflictPrompt(interactive=False)
-    if prompt.ask(rel_key, dest, new_text) == ConflictPrompt.TAKE:
-        try:
-            save_upgrade(project_dir, rel_key + ".mine",
-                         dest.read_text(encoding="utf-8"))
-        except Exception:
-            pass  # unreadable file: taking ours is still the user's choice
+    if prompt.ask(rel_key, dest, new_text, wording) == ConflictPrompt.TAKE:
+        if not dry_run:
+            try:
+                save_upgrade(project_dir, rel_key + ".mine", read_verbatim(dest))
+            except Exception:
+                pass  # unreadable file: taking ours is still the user's choice
         return True
-    save_upgrade(project_dir, rel_key, new_text)
+    if not dry_run:
+        save_upgrade(project_dir, rel_key, new_text)
     return False
 
 
@@ -979,7 +1029,8 @@ def copy_agents(
         for placeholder, value in replacements.items():
             new_content = new_content.replace(placeholder, value)
         if not ok:
-            ok = _resolve_modified(prompt, project_dir, rel_key, dest, new_content)
+            ok = _resolve_modified(prompt, project_dir, rel_key, dest, new_content,
+                                   dry_run=dry_run)
             reason = "replaced on request" if ok else reason
         if ok:
             if not dry_run:
@@ -1038,7 +1089,8 @@ def copy_rules_and_skills(
         ok, reason = should_update_file(dest, rel_key, manifest, force)
         if not ok:
             ok = _resolve_modified(prompt, project_dir, rel_key, dest,
-                                   beads_src.read_text(encoding="utf-8"))
+                                   beads_src.read_text(encoding="utf-8"),
+                                   dry_run=dry_run)
             reason = "replaced on request" if ok else reason
         if ok:
             if not dry_run:
@@ -1060,7 +1112,8 @@ def copy_rules_and_skills(
                 ok, reason = should_update_file(dest, rel_key, manifest, force)
                 if not ok:
                     ok = _resolve_modified(prompt, project_dir, rel_key, dest,
-                                           rule_file.read_text(encoding="utf-8"))
+                                           rule_file.read_text(encoding="utf-8"),
+                                           dry_run=dry_run)
                     reason = "replaced on request" if ok else reason
                 if ok:
                     if not dry_run:
@@ -1094,9 +1147,184 @@ def copy_rules_and_skills(
     return skipped
 
 
+# ============================================================================
+# CLAUDE.md — the one block in it that is ours
+# ============================================================================
+# CLAUDE.md belongs to the project: overview, tech stack, current state. Only
+# what sits between our two markers is ours, and only that is replaced on an
+# upgrade. Everything a person wrote around the markers is never touched.
+
+_BEGIN_RE = re.compile(r"<!--\s*claude-protocol:begin\b.*?-->", re.DOTALL)
+_END_RE = re.compile(r"<!--\s*claude-protocol:end\s*-->")
+_HEADING_RE = re.compile(r"^(#{1,2})\s+(.+?)\s*$")
+
+# Installs made before the markers existed. The block starts at "Your Identity"
+# and runs on while the headings are ours; the set covers every 3.x template,
+# including sections since dropped (Knowledge Base, Investigation Before
+# Delegation) — a project can still be carrying them.
+CLAUDE_MD_BLOCK_START = "Your Identity"
+CLAUDE_MD_BLOCK_HEADINGS = {
+    "Your Identity", "Workflow", "Investigation Before Delegation",
+    "Bug Fixes & Follow-Up", "Knowledge Base", "Agents",
+}
+
+_CLAUDE_MD_NOTE = {
+    "marked": "our block refreshed",
+    "unmarked": "our block marked and refreshed",
+    "appended": "our block appended",
+}
+
+
+def _lf(text: str) -> str:
+    """Line endings normalised, so a CRLF checkout hashes like an LF one."""
+    return text.replace("\r\n", "\n")
+
+
+def marked_span(text: str) -> tuple:
+    """(start, end) of our marked region, markers included, or None."""
+    begin = _BEGIN_RE.search(text)
+    if not begin:
+        return None
+    end = _END_RE.search(text, begin.end())
+    return (begin.start(), end.end()) if end else None
+
+
+def _block_end(lines: list, offsets: list, start: int, stop: int) -> int:
+    """Offset just past the block's last non-blank line."""
+    while stop > start + 1 and not lines[stop - 1].strip():
+        stop -= 1
+    return offsets[stop]
+
+
+def unmarked_span(text: str) -> tuple:
+    """(start, end) of our block in a CLAUDE.md written before the markers.
+
+    Walks forward only while the headings are ours and stops at the first one
+    that is not, so a section the user added between ours is never swallowed.
+    """
+    lines = text.splitlines(keepends=True)
+    offsets, pos = [], 0
+    for line in lines:
+        offsets.append(pos)
+        pos += len(line)
+    offsets.append(pos)
+
+    start = None
+    for i, line in enumerate(lines):
+        heading = _HEADING_RE.match(line.rstrip("\r\n"))
+        if not heading:
+            continue
+        level, title = len(heading.group(1)), heading.group(2)
+        if start is None:
+            if level == 2 and title == CLAUDE_MD_BLOCK_START:
+                start = i
+        elif title not in CLAUDE_MD_BLOCK_HEADINGS:
+            return offsets[start], _block_end(lines, offsets, start, i)
+    if start is None:
+        return None
+    return offsets[start], _block_end(lines, offsets, start, len(lines))
+
+
+def splice(text: str, span: tuple, region: str) -> str:
+    """Replace text[span] with region, in the line endings the file already uses."""
+    region = _lf(region)
+    if "\r\n" in text:
+        region = region.replace("\n", "\r\n")
+    return text[:span[0]] + region + text[span[1]:]
+
+
+def _claude_md_proposal(current: str, region: str) -> tuple:
+    """(whole proposed file, kind) for a CLAUDE.md that already exists.
+
+    kind is "marked" (our region is in there), "unmarked" (our block is there
+    without markers), "appended" (nothing of ours yet) or "unknown"
+    (orchestration text we cannot delimit — nothing is proposed for that one).
+    """
+    span = marked_span(current)
+    if span:
+        return splice(current, span, region), "marked"
+    span = unmarked_span(current)
+    if span:
+        return splice(current, span, region), "unmarked"
+    if "## Workflow" in current and "beads" in current.lower():
+        return None, "unknown"
+    addition = "\n\n---\n\n# Beads Orchestration\n\n" + _lf(region) + "\n"
+    if "\r\n" in current:
+        addition = addition.replace("\n", "\r\n")
+    return current.rstrip("\r\n") + addition, "appended"
+
+
+def _block_is_ours(current: str, manifest: dict) -> bool:
+    """True when the marked region is what we last installed, byte for byte.
+
+    No recorded hash means the markers were put there by hand — and the marker
+    itself says that what it wraps is ours to replace.
+    """
+    span = marked_span(current)
+    if not span:
+        return False
+    recorded = manifest.get("claude_md_block")
+    return not recorded or content_sha256(_lf(current[span[0]:span[1]])) == recorded
+
+
+def _write_claude_md(dest: Path, text: str, region: str, manifest: dict,
+                     dry_run: bool) -> None:
+    """Write the file and remember the block, so the next upgrade knows it is ours."""
+    if dry_run:
+        return
+    write_verbatim(dest, text)
+    manifest["claude_md_block"] = content_sha256(_lf(region))
+
+
+def _hand_over_template(project_dir: Path, template_text: str, why: str,
+                        dry_run: bool) -> None:
+    """Cannot tell where our part ends: leave the file, drop the template beside it."""
+    if not dry_run:
+        save_upgrade(project_dir, "CLAUDE.md", template_text)
+    print(f"  - CLAUDE.md (kept — {why})")
+    print(f"    {_dry(dry_run)}Current template saved to: .claude/.upgrades/CLAUDE.md")
+
+
+def update_claude_md(project_dir: Path, template_text: str, manifest: dict = None,
+                     prompt=None, dry_run: bool = False) -> None:
+    """Refresh our block in CLAUDE.md without touching a line the user wrote."""
+    dest = project_dir / "CLAUDE.md"
+    manifest = manifest if manifest is not None else {}
+    span = marked_span(template_text)
+    region = template_text[span[0]:span[1]] if span else None
+
+    if not dest.exists():
+        _write_claude_md(dest, template_text, region or template_text, manifest, dry_run)
+        print(f"  - {_dry(dry_run)}CLAUDE.md (created)")
+        return
+    if region is None:  # the template lost its markers — never guess
+        _hand_over_template(project_dir, template_text, "template has no markers", dry_run)
+        return
+
+    current = read_verbatim(dest)
+    proposed, kind = _claude_md_proposal(current, region)
+    if kind == "unknown":
+        _hand_over_template(project_dir, template_text,
+                            "our block is not marked and not recognisable", dry_run)
+        return
+
+    # Nothing of ours in the file yet, or our block still exactly as installed:
+    # replacing it destroys nothing, so it needs no question.
+    silent = kind == "appended" or (kind == "marked" and _block_is_ours(current, manifest))
+    wording = CLAUDE_MD_EDITED if kind == "marked" else CLAUDE_MD_UNMARKED
+    if not silent and not _resolve_modified(prompt, project_dir, "CLAUDE.md", dest,
+                                            proposed, wording=wording, dry_run=dry_run):
+        print("  - CLAUDE.md (yours kept)")
+        print(f"    {_dry(dry_run)}Ours saved to: .claude/.upgrades/CLAUDE.md")
+        return
+    _write_claude_md(dest, proposed, region, manifest, dry_run)
+    print(f"  - {_dry(dry_run)}CLAUDE.md ({_CLAUDE_MD_NOTE[kind]})")
+
+
 def copy_settings_and_claude_md(project_dir: Path, project_name: str,
-                                dry_run: bool = False) -> None:
-    """Copy settings.json (merge hooks) and CLAUDE.md (append if exists)."""
+                                dry_run: bool = False, manifest: dict = None,
+                                prompt=None) -> None:
+    """Copy settings.json (merge hooks) and refresh our block in CLAUDE.md."""
     print("\n[5/6] Copying settings and CLAUDE.md...")
 
     # --- settings.json: merge hooks into existing ---
@@ -1131,30 +1359,11 @@ def copy_settings_and_claude_md(project_dir: Path, project_name: str,
     for old_cmd, _ in (migrate_local_settings_hooks(project_dir) if not dry_run else []):
         print(f"  - settings.local.json: rewrote hook path: {old_cmd[:70]}")
 
-    # --- CLAUDE.md: append beads section if file exists ---
-    claude_dest = project_dir / "CLAUDE.md"
+    # --- CLAUDE.md: refresh our marked block, leave the rest of the file alone ---
     claude_src = TEMPLATES_DIR / "CLAUDE.md"
     if claude_src.exists():
-        beads_content = claude_src.read_text(encoding='utf-8').replace("[Project]", project_name)
-        if claude_dest.exists():
-            existing_content = claude_dest.read_text(encoding='utf-8')
-            if "## Workflow" in existing_content and "beads" in existing_content.lower():
-                # Never rewrite a CLAUDE.md a human has been editing — hand the
-                # current template over instead, the way rules are handed over.
-                if not dry_run:
-                    save_upgrade(project_dir, "CLAUDE.md", beads_content)
-                print("  - CLAUDE.md (already has beads section, kept)")
-                print(f"    {_dry(dry_run)}Current template saved to: .claude/.upgrades/CLAUDE.md")
-            else:
-                separator = "\n\n---\n\n# Beads Orchestration\n\n"
-                if not dry_run:
-                    with open(claude_dest, "a", encoding="utf-8") as f:
-                        f.write(separator + beads_content)
-                print(f"  - {_dry(dry_run)}CLAUDE.md (appended beads section)")
-        else:
-            if not dry_run:
-                claude_dest.write_text(beads_content, encoding='utf-8')
-            print(f"  - {_dry(dry_run)}CLAUDE.md (created)")
+        template_text = read_verbatim(claude_src).replace("[Project]", project_name)
+        update_claude_md(project_dir, template_text, manifest, prompt, dry_run)
 
     print("  DONE")
 
@@ -1279,7 +1488,8 @@ def bootstrap_project(
     # asks nothing, and a run with no person attached keeps the user's files.
     prompt = ConflictPrompt(
         interactive=not (force or keep_mine or dry_run) and _stdin_is_a_person(),
-        sticky=ConflictPrompt.KEEP if keep_mine or dry_run else None,
+        sticky=(ConflictPrompt.TAKE if force
+                else ConflictPrompt.KEEP if keep_mine or dry_run else None),
     )
     if prompt.will_ask:
         print("\nFiles you edited will be shown one by one — you decide each.")
@@ -1293,7 +1503,7 @@ def bootstrap_project(
     all_skipped += copy_rules_and_skills(
         project_dir, with_rules, lang, manifest, force, prompt, dry_run,
     )
-    copy_settings_and_claude_md(project_dir, resolved_name, dry_run)
+    copy_settings_and_claude_md(project_dir, resolved_name, dry_run, manifest, prompt)
     setup_gitignore(project_dir, dry_run)
 
     # Read version from package.json (same package as bootstrap.py)
