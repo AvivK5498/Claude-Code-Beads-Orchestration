@@ -2,10 +2,12 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -345,6 +347,189 @@ class TestConfigureBeadsExport:
         result = configure_beads_export(tmp_path)
 
         assert result is False
+
+
+# ============================================================================
+# install_beads: consent, PATH, version, and a bd init that failed
+# ============================================================================
+# The step used to put a global program on the machine without asking, call it
+# a success without checking the system could find it, and hand-make an empty
+# .beads/ when `bd init` failed — a project that looks installed and answers
+# every bd command with an error.
+
+
+class _Machine:
+    """A fake machine: which() answers per program, run() records commands.
+
+    `bd` is absent until a package manager installs it, unless
+    `installs_to_path=False` — that is the `go install` case, where the command
+    succeeds and the binary still is not on this process's PATH.
+    """
+
+    MANAGERS = ("brew", "npm", "go")
+
+    def __init__(self, bd_present=False, installs_to_path=True,
+                 version_out="bd version 1.1.0 (abc123)", init_rc=0,
+                 init_err="", managers=MANAGERS, init_creates_beads=True):
+        self.calls = []
+        self.bd_present = bd_present
+        self.installs_to_path = installs_to_path
+        self.version_out = version_out
+        self.init_rc = init_rc
+        self.init_err = init_err
+        self.managers = managers
+        self.init_creates_beads = init_creates_beads
+
+    def which(self, name):
+        if name == "bd":
+            return "/usr/bin/bd" if self.bd_present else None
+        return f"/usr/bin/{name}" if name in self.managers else None
+
+    def run(self, cmd, **kwargs):
+        cmd = list(cmd)
+        self.calls.append(cmd)
+        if cmd[0] in self.MANAGERS:
+            self.bd_present = self.installs_to_path
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if cmd[:2] == ["bd", "version"]:
+            return SimpleNamespace(returncode=0, stdout=self.version_out, stderr="")
+        if cmd[:2] == ["bd", "init"]:
+            if self.init_rc == 0 and self.init_creates_beads:
+                Path(kwargs["cwd"], ".beads").mkdir(parents=True, exist_ok=True)
+            return SimpleNamespace(returncode=self.init_rc, stdout="", stderr=self.init_err)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def install(self, monkeypatch, someone_is_here=False):
+        monkeypatch.setattr(bootstrap.shutil, "which", self.which)
+        monkeypatch.setattr(bootstrap.subprocess, "run", self.run)
+        monkeypatch.setattr(bootstrap, "_stdin_is_a_person",
+                            lambda: someone_is_here)
+        return self
+
+    @property
+    def manager_calls(self):
+        return [c for c in self.calls if c[0] in self.MANAGERS]
+
+
+class TestInstallBeadsAsksFirst:
+    def test_nobody_to_ask_installs_nothing(self, tmp_path, monkeypatch, capsys):
+        """A batch upgrade, CI, or an agent driving the CLI: no person, no
+        global install. The command to run by hand is printed instead."""
+        machine = _Machine().install(monkeypatch, someone_is_here=False)
+
+        assert bootstrap.install_beads(tmp_path) is False
+        assert machine.manager_calls == [], "installed something with nobody to ask"
+        assert "--install-beads" in capsys.readouterr().out
+
+    def test_the_flag_installs_without_asking(self, tmp_path, monkeypatch):
+        machine = _Machine().install(monkeypatch, someone_is_here=False)
+
+        assert bootstrap.install_beads(tmp_path, install_bd=True) is True
+        assert machine.manager_calls, "the flag did not install anything"
+
+    def test_a_no_at_the_prompt_installs_nothing(self, tmp_path, monkeypatch):
+        machine = _Machine().install(monkeypatch, someone_is_here=True)
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+
+        assert bootstrap.install_beads(tmp_path) is False
+        assert machine.manager_calls == []
+
+    def test_a_yes_at_the_prompt_installs(self, tmp_path, monkeypatch):
+        machine = _Machine().install(monkeypatch, someone_is_here=True)
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+
+        assert bootstrap.install_beads(tmp_path) is True
+        assert machine.manager_calls
+
+    def test_no_package_manager_at_all(self, tmp_path, monkeypatch, capsys):
+        machine = _Machine(managers=()).install(monkeypatch, someone_is_here=True)
+
+        assert bootstrap.install_beads(tmp_path) is False
+        assert machine.manager_calls == []
+        assert bootstrap.BD_DOCS_URL in capsys.readouterr().out
+
+
+class TestInstallBeadsChecksItsWork:
+    def test_installed_but_not_on_path_is_not_success(self, tmp_path, monkeypatch, capsys):
+        """`go install` writes to a directory that is often outside PATH, and
+        a PATH just extended is not this process's PATH."""
+        _Machine(installs_to_path=False).install(monkeypatch)
+
+        assert bootstrap.install_beads(tmp_path, install_bd=True) is False
+        assert "PATH" in capsys.readouterr().out
+
+    def test_failed_bd_init_leaves_no_half_made_beads(self, tmp_path, monkeypatch, capsys):
+        _Machine(bd_present=True, init_rc=1,
+                 init_err="dolt: connection refused").install(monkeypatch)
+
+        assert bootstrap.install_beads(tmp_path) is False
+        assert not (tmp_path / ".beads").exists(), "made a .beads that bd cannot use"
+        assert "dolt: connection refused" in capsys.readouterr().out
+
+    def test_old_bd_warns_and_keeps_going(self, tmp_path, monkeypatch, capsys):
+        _Machine(bd_present=True,
+                 version_out="bd version 0.9.0 (abc)").install(monkeypatch)
+
+        assert bootstrap.install_beads(tmp_path) is True
+        out = capsys.readouterr().out
+        assert "0.9.0" in out and bootstrap.BD_MIN_VERSION in out
+
+    def test_current_bd_says_nothing_about_versions(self, tmp_path, monkeypatch, capsys):
+        _Machine(bd_present=True).install(monkeypatch)
+
+        assert bootstrap.install_beads(tmp_path) is True
+        assert "older than" not in capsys.readouterr().out
+
+    def test_a_normal_run_still_initializes(self, tmp_path, monkeypatch):
+        machine = _Machine(bd_present=True).install(monkeypatch)
+
+        assert bootstrap.install_beads(tmp_path) is True
+        assert ["bd", "init"] in machine.calls
+        assert ["bd", "config", "set", "export.git-add", "false"] in machine.calls
+
+    def test_bd_init_that_says_yes_and_makes_nothing_is_a_failure(
+            self, tmp_path, monkeypatch, capsys):
+        """`bd init` inside an existing beads repository exits 0 and
+        initializes nothing here. Everything downstream expects .beads/ here."""
+        _Machine(bd_present=True, init_creates_beads=False).install(monkeypatch)
+
+        assert bootstrap.install_beads(tmp_path) is False
+        assert "left no .beads/" in capsys.readouterr().out
+
+
+class TestBdVersionReading:
+    @pytest.mark.parametrize("text,expected", [
+        ("bd version 1.1.0 (8e4e59d39: HEAD@8e4e59d39f34)", "1.1.0"),
+        ("bd version 10.2.13", "10.2.13"),
+        ("", None),
+        ("bd version unknown", None),
+    ])
+    def test_parse(self, text, expected):
+        assert bootstrap.parse_bd_version(text) == expected
+
+    @pytest.mark.parametrize("current,expected", [
+        ("1.0.9", True),
+        ("0.9.0", True),
+        ("1.1.0", False),
+        ("1.1.1", False),
+        ("2.0.0", False),
+        (None, False),
+        ("nonsense", False),
+    ])
+    def test_below_minimum(self, current, expected):
+        assert bootstrap.version_below(current, "1.1.0") is expected
+
+
+class TestMinimumVersionIsStatedOnce:
+    def test_python_and_the_hook_agree(self):
+        """The constant lives in two languages. Two copies drift silently, so
+        the test is the thing that keeps them equal."""
+        hook = (Path(__file__).parent.parent / "templates" / "hooks"
+                / "hook-utils.cjs").read_text(encoding="utf-8")
+        match = re.search(r"BD_MIN_VERSION\s*=\s*['\"]([\d.]+)['\"]", hook)
+
+        assert match, "hook-utils.cjs no longer declares BD_MIN_VERSION"
+        assert match.group(1) == bootstrap.BD_MIN_VERSION
 
 
 # ============================================================================
@@ -2871,8 +3056,16 @@ class TestDryRunDoesNotInstallBeads:
 
     def test_a_real_run_still_installs(self, tmp_path, monkeypatch):
         ran = []
-        monkeypatch.setattr(bootstrap.subprocess, "run",
-                            lambda cmd, *a, **kw: ran.append(cmd) or _FakeRun())
+
+        def fake_run(cmd, *a, **kw):
+            ran.append(cmd)
+            # `bd init` is what creates .beads/, and install_beads now checks
+            # that it really did rather than trusting the exit code.
+            if list(cmd)[:2] == ["bd", "init"]:
+                Path(kw["cwd"], ".beads").mkdir(parents=True, exist_ok=True)
+            return _FakeRun()
+
+        monkeypatch.setattr(bootstrap.subprocess, "run", fake_run)
         monkeypatch.setattr(bootstrap.shutil, "which", lambda name: "bd")
 
         assert bootstrap.install_beads(tmp_path) is True

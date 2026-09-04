@@ -354,3 +354,67 @@ describe('execCommand argument passing', () => {
     expect(res.stderr).toBe('');
   });
 });
+
+// ---------------------------------------------------------------------------
+// beads version
+// ---------------------------------------------------------------------------
+// An old bd does not announce itself: it fails one command at a time with
+// "unknown command". These two functions turn that into one line at session
+// start — so a false positive would nag every session, and a false negative
+// only costs the warning.
+
+const {
+  BD_MIN_VERSION,
+  parseBdVersion,
+  versionBelow,
+} = require('../../templates/hooks/hook-utils.cjs');
+
+describe('parseBdVersion', () => {
+  it('reads the version out of real `bd version` output', () => {
+    expect(parseBdVersion('bd version 1.1.0 (8e4e59d39: HEAD@8e4e59d39f34)')).toBe('1.1.0');
+  });
+
+  it('reads a multi-digit version', () => {
+    expect(parseBdVersion('bd version 10.2.13')).toBe('10.2.13');
+  });
+
+  it('returns null for empty output', () => {
+    expect(parseBdVersion('')).toBeNull();
+    expect(parseBdVersion(null)).toBeNull();
+  });
+
+  it('returns null when there is no version in the text', () => {
+    expect(parseBdVersion('bd version unknown')).toBeNull();
+  });
+});
+
+describe('versionBelow', () => {
+  it('is true below the minimum', () => {
+    expect(versionBelow('1.0.9', '1.1.0')).toBe(true);
+    expect(versionBelow('0.9.0', '1.1.0')).toBe(true);
+  });
+
+  it('is false at or above the minimum', () => {
+    expect(versionBelow('1.1.0', '1.1.0')).toBe(false);
+    expect(versionBelow('1.1.1', '1.1.0')).toBe(false);
+    expect(versionBelow('2.0.0', '1.1.0')).toBe(false);
+  });
+
+  it('compares numbers, not strings', () => {
+    expect(versionBelow('1.10.0', '1.9.0')).toBe(false);
+    expect(versionBelow('1.9.0', '1.10.0')).toBe(true);
+  });
+
+  it('stays silent on anything it cannot read', () => {
+    expect(versionBelow(null, '1.1.0')).toBe(false);
+    expect(versionBelow(undefined, '1.1.0')).toBe(false);
+    expect(versionBelow('nonsense', '1.1.0')).toBe(false);
+    expect(versionBelow('1.1', '1.1.0')).toBe(false);
+  });
+});
+
+describe('BD_MIN_VERSION', () => {
+  it('is a three-part version', () => {
+    expect(BD_MIN_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+});

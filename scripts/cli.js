@@ -29,6 +29,9 @@ Options:
   --force          Take our version of every file, no questions asked
   --keep-mine      Keep your version of every file you edited, no questions
   --dry-run        Print what would change and write nothing
+  --install-beads  Install the beads CLI (bd) without asking. By default you
+                   are asked first, and a run nobody can answer installs
+                   nothing and prints the command instead.
   --all <parent>   Batch upgrade: iterate subdirs of <parent> with .beads/ (upgrade only)
 
 Examples:

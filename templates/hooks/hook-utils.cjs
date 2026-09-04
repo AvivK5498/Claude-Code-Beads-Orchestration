@@ -20,6 +20,12 @@ const path = require('path');
 // Module-level permission mode — set by readStdinJSON(), read by deny()/ask()
 let _permissionMode = '';
 
+// The oldest beads CLI the rules work against: they call bd memories, bd
+// remember, bd worktree and bd prime. Keep in sync with BD_MIN_VERSION in
+// bootstrap.py — a test asserts the two agree, because two copies of a
+// constant in two languages drift silently.
+const BD_MIN_VERSION = '1.1.0';
+
 // ---------------------------------------------------------------------------
 // Stdin
 // ---------------------------------------------------------------------------
@@ -232,6 +238,38 @@ function execCommandJSON(cmd, args, opts) {
 }
 
 // ---------------------------------------------------------------------------
+// beads version
+// ---------------------------------------------------------------------------
+
+/**
+ * First dotted version in `bd version` output: 'bd version 1.1.0 (...)'.
+ * Returns null when the text holds none.
+ */
+function parseBdVersion(text) {
+  if (!text) return null;
+  const match = /\d+\.\d+\.\d+/.exec(text);
+  return match ? match[0] : null;
+}
+
+/**
+ * True when `current` is older than `minimum`.
+ *
+ * Anything unreadable is false: a version we cannot parse is not evidence of
+ * an old one, and a false alarm on every session start is worse than silence.
+ */
+function versionBelow(current, minimum) {
+  const parts = (v) => String(v).split('.').map(Number);
+  const a = parts(current);
+  const b = parts(minimum);
+  if (a.length !== 3 || a.some(Number.isNaN)) return false;
+  if (b.length !== 3 || b.some(Number.isNaN)) return false;
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return a[i] < b[i];
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // Git helpers
 // ---------------------------------------------------------------------------
 
@@ -438,6 +476,9 @@ function runHook(hookName, fn) {
 // ---------------------------------------------------------------------------
 
 module.exports = {
+  BD_MIN_VERSION,
+  parseBdVersion,
+  versionBelow,
   readStdinJSON,
   getField,
   deny,
