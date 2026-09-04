@@ -1377,11 +1377,14 @@ class TestHookCommandShape:
                 assert chr(10) not in entry["hooks"][0]["command"]
 
     def test_canonical_map_covers_every_shipped_hook(self):
-        """Every hook file we install needs a command; hook-utils is a shared
-        library, not a hook."""
+        """Every hook file we install needs a command. Two files in there are
+        not hooks: hook-utils is the shared library, and update-check is the
+        helper session-start spawns so a network call can be given a hard time
+        limit of its own."""
+        helpers = {"hook-utils.cjs", "update-check.cjs"}
         shipped = {
             f.name for f in (TEMPLATES_DIR / "hooks").glob("*.cjs")
-            if f.name != "hook-utils.cjs"
+            if f.name not in helpers
         }
         assert shipped == set(canonical_hook_commands())
 
