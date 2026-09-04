@@ -14,13 +14,20 @@ const path = require('path');
 const {
   injectText, execCommand, getProjectDir, runHook,
   parseBdVersion, versionBelow, BD_MIN_VERSION,
+  hasBeads, isPluginInstall,
 } = require('./hook-utils.cjs');
 
 runHook('session-start', () => {
   const projectDir = getProjectDir();
 
-  if (!fs.existsSync(path.join(projectDir, '.beads'))) {
-    injectText("No .beads directory found. Run 'bd init' to initialize.\n");
+  if (!hasBeads()) {
+    // A copy installed under a project's .claude/hooks/ is there because
+    // someone put it there, so the missing directory is worth saying out loud.
+    // The plugin runs in every project it is enabled for, and telling each of
+    // them to run `bd init` every session is noise, not help.
+    if (!isPluginInstall()) {
+      injectText("No .beads directory found. Run 'bd init' to initialize.\n");
+    }
     process.exit(0);
   }
 

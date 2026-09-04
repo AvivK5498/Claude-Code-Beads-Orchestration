@@ -7,12 +7,17 @@
 const fs = require('fs');
 const path = require('path');
 const {
-  readStdinJSON, getField, approve, block,
+  readStdinJSON, getField, approve, block, hasBeads,
   execCommand, getRepoRoot, runHook,
 } = require('./hook-utils.cjs');
 
 runHook('validate-completion', () => {
   const input = readStdinJSON();
+
+  // Every check here is about the bead lifecycle. As a plugin this runs after
+  // every subagent in every project, and a project without .beads/ has no
+  // lifecycle to verify.
+  if (!hasBeads()) approve();
   const agentTranscript = getField(input, 'agent_transcript_path');
   const mainTranscript = getField(input, 'transcript_path');
   const agentId = getField(input, 'agent_id');

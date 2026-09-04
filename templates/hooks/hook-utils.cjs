@@ -299,9 +299,33 @@ function getCurrentBranch() {
 function getProjectDir() {
   const fromEnv = process.env.CLAUDE_PROJECT_DIR;
   if (fromEnv) return fromEnv;
-  const fromHere = path.resolve(__dirname, '..', '..');
-  if (fs.existsSync(path.join(fromHere, '.claude'))) return fromHere;
+  // Walking up from __dirname is only meaningful for the copy installed under
+  // a project's .claude/hooks/. Started from the plugin, this file lives in the
+  // plugin's own checkout — which has a .claude/ and a .beads/ of its own, so
+  // the guess would answer with the plugin instead of the project being worked
+  // on, and every check built on the answer would be about the wrong place.
+  if (!isPluginInstall()) {
+    const fromHere = path.resolve(__dirname, '..', '..');
+    if (fs.existsSync(path.join(fromHere, '.claude'))) return fromHere;
+  }
   return process.cwd();
+}
+
+/** True when this hook was started by the plugin, not by a copy in a project. */
+function isPluginInstall() {
+  return Boolean(process.env.CLAUDE_PLUGIN_ROOT);
+}
+
+/**
+ * True when the project being worked on tracks its work in beads.
+ *
+ * The plugin's hooks run in every project it is enabled for. Everything these
+ * hooks enforce — bead lifecycle, worktree isolation, the completion report —
+ * is meaningless where there is no .beads/, and refusing `git commit
+ * --no-verify` in someone's unrelated repository is not our call to make.
+ */
+function hasBeads() {
+  return fs.existsSync(path.join(getProjectDir(), '.beads'));
 }
 
 // ---------------------------------------------------------------------------
@@ -491,6 +515,8 @@ module.exports = {
   getRepoRoot,
   getCurrentBranch,
   getProjectDir,
+  isPluginInstall,
+  hasBeads,
   parseBeadId,
   parseEpicId,
   containsPathSegment,

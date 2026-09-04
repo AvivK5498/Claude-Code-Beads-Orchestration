@@ -1,8 +1,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'child_process';
+import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 const HOOK_PATH = path.resolve(__dirname, '../../templates/hooks/bash-guard.cjs');
+
+// The hook stands down where work is not tracked in beads, so a test that
+// expects it to act has to say which project it is acting on. Leaving that to
+// whatever directory the suite happens to run in is how it used to pass by
+// accident.
+const BEADS_PROJECT = fs.mkdtempSync(path.join(os.tmpdir(), 'bash-guard-beads-'));
+fs.mkdirSync(path.join(BEADS_PROJECT, '.beads'), { recursive: true });
+const PLAIN_PROJECT = fs.mkdtempSync(path.join(os.tmpdir(), 'bash-guard-plain-'));
 
 /**
  * Run the bash-guard hook as a subprocess with given stdin JSON.
@@ -15,7 +25,7 @@ function runHook(stdinData, env = {}) {
       input,
       encoding: 'utf8',
       timeout: 5000,
-      env: { ...process.env, ...env },
+      env: { ...process.env, CLAUDE_PROJECT_DIR: BEADS_PROJECT, ...env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     return { stdout, exitCode: 0 };
@@ -191,4 +201,43 @@ describe('bash-guard hook', () => {
     });
   });
 
+});
+
+// ---------------------------------------------------------------------------
+// Projects that do not use beads
+// ---------------------------------------------------------------------------
+// As a plugin this hook runs in every project it is enabled for. Refusing
+// `git commit --no-verify` in a repository that never asked for any of this is
+// not our call, and the bd checks have nothing to check there.
+
+describe('a project without .beads', () => {
+  it('is left alone even for a command the hook would refuse', () => {
+    const result = runHook(makeInput('git commit --no-verify -m "skip hooks"'),
+                           { CLAUDE_PROJECT_DIR: PLAIN_PROJECT });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe('');
+  });
+
+  it('is left alone for raw git worktree add', () => {
+    const result = runHook(makeInput('git worktree add ../wt -b feature'),
+                           { CLAUDE_PROJECT_DIR: PLAIN_PROJECT });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe('');
+  });
+
+  it('is left alone for bd create without a description', () => {
+    const result = runHook(makeInput('bd create "no description"'),
+                           { CLAUDE_PROJECT_DIR: PLAIN_PROJECT });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe('');
+  });
+
+  it('does not change what happens in a beads project', () => {
+    const result = runHook(makeInput('git commit --no-verify -m "skip hooks"'));
+
+    expect(result.stdout).toContain('deny');
+  });
 });
