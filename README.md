@@ -117,13 +117,13 @@ CLAUDE.md                   # Orchestrator instructions
 
 First install and re-install use the same command: `npx claude-protocol init`.
 
-- **Hooks and skills** — always updated to the latest version (enforcement code).
-- **Rules and agents** — updated only if you haven't modified them. Modified files are preserved; the new version is saved to `.claude/.upgrades/` for manual review.
-- **CLAUDE.md** — beads section appended if missing. Original content preserved.
+- **Hooks** — always updated to the latest version (enforcement code). Only files we ship are replaced; a hook of your own is untouched.
+- **Rules, agents and the project-discovery skill** — updated only if you haven't modified them. A file you edited becomes a question; the version you don't pick is kept under `.claude/.upgrades/`. Files of your own inside the skill directory are never touched.
+- **CLAUDE.md** — only the block between `<!-- claude-protocol:begin -->` and `<!-- claude-protocol:end -->` is ours, and only that block is refreshed. Your overview, tech stack and current state are never touched.
 - **settings.json** — hooks merged by event type. Your existing hooks stay.
 - **.gitignore** — missing entries appended. Nothing removed.
 
-Use `--force` to overwrite all files regardless of modifications.
+Use `--force` to take our version of every file. Rules, agents, the skill and the CLAUDE.md block are copied to `.claude/.upgrades/<path>.mine` first, and an earlier copy is never overwritten, so every version you replace is still there. Hooks are replaced outright with no copy — they are enforcement code, replaced on every run anyway.
 
 ### What happens at session start
 
@@ -173,7 +173,7 @@ Restart Claude Code. Run `/project-discovery`.
 | `--project-name NAME` | Project name for CLAUDE.md (auto-inferred from package.json / pyproject.toml / Cargo.toml / go.mod) |
 | `--no-rules` | Skip dev rules (implementation, logging, TDD, resilience) |
 | `--lang en\|ru` | Language for dev rules (default: en) |
-| `--force` | Take our version of every file, no questions asked |
+| `--force` | Take our version of every file, no questions asked (yours is kept in `.claude/.upgrades/`) |
 | `--keep-mine` | Keep your version of every file you edited, no questions asked |
 
 ### Local development (before npm publish)
@@ -194,6 +194,14 @@ version you do not choose is kept next to the file under `.claude/.upgrades/`,
 so nothing you wrote is ever lost. Where no one can answer — batch upgrades,
 CI, an agent driving the CLI — your files are kept and ours are saved beside
 them. `--force` and `--keep-mine` answer for every file up front.
+
+**CLAUDE.md is different: it is yours, and only a marked block inside it is
+ours.** Everything between `<!-- claude-protocol:begin -->` and
+`<!-- claude-protocol:end -->` is replaced on upgrade; the project overview,
+tech stack and current state around it are never read, never rewritten. A
+project installed before the markers existed is asked once — with a diff —
+whether to mark the block it already carries. Say no and nothing changes: the
+current template lands in `.claude/.upgrades/CLAUDE.md`, exactly as before.
 
 ### Preview (recommended first)
 
@@ -314,7 +322,7 @@ A: Restart Claude Code. Hooks load from `settings.json` at startup.
 A: `beads-workflow.md` includes a full command reference table. If Claude still invents commands, it didn't read the rules — check that `.claude/rules/` exists.
 
 **Q: What happens if I run `init` again after updating claude-protocol?**
-A: Modified rules and agents are preserved — new versions go to `.claude/.upgrades/` for you to review. Hooks and skills are always updated. Use `--force` for a clean reinstall.
+A: Rules, agents and the skill you edited become a question, one file at a time, with a diff on request; the version you do not pick is kept under `.claude/.upgrades/`. Hooks are always updated. In CLAUDE.md only our marked block is refreshed — the rest of the file stays yours. `--force` and `--keep-mine` answer for everything up front.
 
 **Q: Can I use this without Dolt?**
 A: Yes. Beads works with SQLite by default. Dolt adds version history and branching for the task database.

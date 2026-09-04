@@ -37,6 +37,12 @@ from bootstrap import (
     _has_existing_install,
     copy_settings_and_claude_md,
     copy_rules_and_skills,
+    marked_span,
+    unmarked_span,
+    splice,
+    update_claude_md,
+    read_verbatim,
+    write_verbatim,
     _hook_basename,
     _entry_key,
     canonical_hook_commands,
@@ -1018,7 +1024,7 @@ class TestUpgradeFlag:
 
         # Stub out heavy steps so test stays fast & offline
         monkeypatch.setattr(bootstrap, "cleanup_obsolete", fake_cleanup)
-        monkeypatch.setattr(bootstrap, "install_beads", lambda pd: True)
+        monkeypatch.setattr(bootstrap, "install_beads", lambda pd, *a, **kw: True)
         monkeypatch.setattr(bootstrap, "copy_agents", lambda *a, **kw: [])
         monkeypatch.setattr(bootstrap, "copy_hooks", lambda *a, **kw: None)
         monkeypatch.setattr(bootstrap, "copy_rules_and_skills", lambda *a, **kw: [])
@@ -1048,7 +1054,7 @@ class TestUpgradeFlag:
             }
 
         monkeypatch.setattr(bootstrap, "cleanup_obsolete", fake_cleanup)
-        monkeypatch.setattr(bootstrap, "install_beads", lambda pd: True)
+        monkeypatch.setattr(bootstrap, "install_beads", lambda pd, *a, **kw: True)
         monkeypatch.setattr(bootstrap, "copy_agents", lambda *a, **kw: [])
         monkeypatch.setattr(bootstrap, "copy_hooks", lambda *a, **kw: None)
         monkeypatch.setattr(bootstrap, "copy_rules_and_skills", lambda *a, **kw: [])
@@ -1536,13 +1542,12 @@ class TestRuleSets:
 
 def _stub_heavy_steps(monkeypatch):
     """Everything that talks to the network, bd, or git."""
-    monkeypatch.setattr(bootstrap, "install_beads", lambda pd: True)
+    _stub_external(monkeypatch)
     monkeypatch.setattr(bootstrap, "copy_agents", lambda *a, **kw: [])
     monkeypatch.setattr(bootstrap, "copy_hooks", lambda *a, **kw: None)
     monkeypatch.setattr(bootstrap, "copy_rules_and_skills", lambda *a, **kw: [])
     monkeypatch.setattr(bootstrap, "copy_settings_and_claude_md", lambda *a, **kw: None)
     monkeypatch.setattr(bootstrap, "setup_gitignore", lambda *a, **kw: None)
-    monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda *a, **kw: None)
 
 
 class TestManifestKey:
@@ -1668,6 +1673,20 @@ class TestSettingsAndClaudeMdSafety:
         assert backup.read_text(encoding="utf-8") == original
         assert "CLAUDE_PROJECT_DIR" in (claude / "settings.json").read_text(encoding="utf-8")
 
+    def test_an_unparseable_settings_json_is_kept_before_replacing_it(self, tmp_path):
+        """Merging is impossible, replacing is fine — losing it silently is not."""
+        claude = tmp_path / ".claude"
+        claude.mkdir()
+        broken = b'{"hooks": {  <- someone was editing this\r\n'
+        (claude / "settings.json").write_bytes(broken)
+
+        copy_settings_and_claude_md(tmp_path, "Demo")
+
+        assert "CLAUDE_PROJECT_DIR" in read_verbatim(claude / "settings.json")
+        kept = claude / ".upgrades" / "settings.json.before-merge"
+        assert kept.exists(), "the file we could not parse was replaced with no copy"
+        assert kept.read_bytes() == broken, "the copy is not byte-for-byte"
+
     def test_existing_claude_md_is_kept_and_template_offered(self, tmp_path):
         """A CLAUDE.md a human has edited is never rewritten — but the current
         template has to reach them somehow."""
@@ -1688,6 +1707,29 @@ class TestSettingsAndClaudeMdSafety:
 # ============================================================================
 # Silently keeping it and dropping ours in .upgrades/ turned every upgrade into
 # homework. Now it is a question — but only where someone can answer it.
+
+
+def _stub_external(monkeypatch):
+    """bd and bd doctor — everything that leaves the process."""
+    monkeypatch.setattr(bootstrap, "install_beads", lambda pd, *a, **kw: True)
+    monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda *a, **kw: None)
+
+
+def _snapshot(root):
+    """Every file under root, by path, as bytes."""
+    return {str(f.relative_to(root)): f.read_bytes()
+            for f in root.rglob('*') if f.is_file()}
+
+
+def _explode(_):
+    """input() for a run where nobody should be asked anything."""
+    raise AssertionError("asked a question that nobody should have been asked")
+
+
+def _copy_rules(tmp_path, manifest, *, force=False, prompt=None, dry_run=False):
+    """copy_rules_and_skills without seven positional arguments to miscount."""
+    return copy_rules_and_skills(tmp_path, True, "en", manifest, force,
+                                 prompt, dry_run)
 
 
 def _modified_rule(tmp_path, name="implementation-standard.md", text="mine\n"):
@@ -1764,10 +1806,7 @@ class TestConflictPromptDecides:
     def test_non_interactive_never_asks(self, tmp_path, monkeypatch):
         prompt = bootstrap.ConflictPrompt(interactive=False)
 
-        def explode(_):
-            raise AssertionError("asked a question with nobody there")
-
-        monkeypatch.setattr("builtins.input", explode)
+        monkeypatch.setattr("builtins.input", _explode)
         target = tmp_path / "f.md"
         target.write_text("mine", encoding="utf-8")
 
@@ -1780,7 +1819,7 @@ class TestNothingIsEverLost:
         manifest = _modified_rule(tmp_path)
         prompt = bootstrap.ConflictPrompt(interactive=False)
 
-        skipped = copy_rules_and_skills(tmp_path, True, "en", manifest, False, prompt)
+        skipped = _copy_rules(tmp_path, manifest, prompt=prompt)
 
         rule = tmp_path / ".claude" / "rules" / "implementation-standard.md"
         assert rule.read_text(encoding="utf-8") == "mine\n"
@@ -1793,7 +1832,7 @@ class TestNothingIsEverLost:
         prompt = bootstrap.ConflictPrompt(interactive=True)
         monkeypatch.setattr("builtins.input", lambda _: "T")
 
-        skipped = copy_rules_and_skills(tmp_path, True, "en", manifest, False, prompt)
+        skipped = _copy_rules(tmp_path, manifest, prompt=prompt)
 
         rule = tmp_path / ".claude" / "rules" / "implementation-standard.md"
         assert "IMPLEMENTATION STANDARD" in rule.read_text(encoding="utf-8")
@@ -1807,7 +1846,7 @@ class TestNothingIsEverLost:
         prompt = bootstrap.ConflictPrompt(interactive=True)
         monkeypatch.setattr("builtins.input", lambda _: "T")
 
-        copy_rules_and_skills(tmp_path, True, "en", manifest, False, prompt)
+        _copy_rules(tmp_path, manifest, prompt=prompt)
 
         rule = tmp_path / ".claude" / "rules" / "implementation-standard.md"
         assert manifest["files"]["rules/implementation-standard.md"] == file_sha256(rule)
@@ -1857,15 +1896,8 @@ class TestPromptWiring:
 
 
 class TestDryRunWritesNothing:
-    def _snapshot(self, root):
-        return {
-            str(f.relative_to(root)): f.read_bytes()
-            for f in root.rglob("*") if f.is_file()
-        }
-
     def test_fresh_project_stays_empty(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(bootstrap, "install_beads", lambda pd: True)
-        monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda pd: None)
+        _stub_external(monkeypatch)
 
         rc = bootstrap.bootstrap_project(
             project_dir=tmp_path, project_name="Demo", with_rules=True,
@@ -1876,14 +1908,13 @@ class TestDryRunWritesNothing:
         assert list(tmp_path.rglob("*")) == [], "dry run created files"
 
     def test_existing_install_is_left_byte_for_byte(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(bootstrap, "install_beads", lambda pd: True)
-        monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda pd: None)
+        _stub_external(monkeypatch)
         # A real install first...
         bootstrap.bootstrap_project(
             project_dir=tmp_path, project_name="Demo", with_rules=True,
             lang="en", force=False, upgrade=False, dry_run=False,
         )
-        before = self._snapshot(tmp_path)
+        before = _snapshot(tmp_path)
         assert before, "nothing was installed, the test proves nothing"
 
         # ...then a preview of the next upgrade
@@ -1892,11 +1923,10 @@ class TestDryRunWritesNothing:
             lang="en", force=False, upgrade=True, dry_run=True,
         )
 
-        assert self._snapshot(tmp_path) == before
+        assert _snapshot(tmp_path) == before
 
     def test_preview_still_reports_what_would_happen(self, tmp_path, monkeypatch, capsys):
-        monkeypatch.setattr(bootstrap, "install_beads", lambda pd: True)
-        monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda pd: None)
+        _stub_external(monkeypatch)
 
         bootstrap.bootstrap_project(
             project_dir=tmp_path, project_name="Demo", with_rules=True,
@@ -1907,3 +1937,753 @@ class TestDryRunWritesNothing:
         assert "[DRY-RUN] settings.json" in out
         assert "[DRY-RUN] rules/beads-workflow.md" in out
         assert "[DRY-RUN] CLAUDE.md" in out
+
+    def test_a_modified_rule_leaves_no_upgrade_file(self, tmp_path):
+        """Saving the losing version is a write too, and a preview makes none."""
+        manifest = _modified_rule(tmp_path)
+
+        _copy_rules(tmp_path, manifest, force=False,
+                    prompt=bootstrap.ConflictPrompt(interactive=False),
+                    dry_run=True)
+
+        assert not (tmp_path / ".claude" / ".upgrades").exists()
+
+
+# ============================================================================
+# CLAUDE.md — our block, and only our block
+# ============================================================================
+# CLAUDE.md carries the project overview, the tech stack and the current state,
+# so it is never overwritten wholesale. Until now that also meant our
+# instructions inside it were never updated: the template landed in .upgrades/
+# and a human merged it by hand. Markers make the replacement automatic and
+# bounded — everything outside them is not ours to touch.
+
+
+LEGACY_CLAUDE_MD = """# Demo
+
+## Project Overview
+
+We sell widgets, and only this file says so.
+
+## Tech Stack
+
+- Rust
+
+## Your Identity
+
+**You are an orchestrator and co-pilot.**
+
+- wording from 3.5 that nobody ships any more
+
+## Workflow
+
+old workflow text
+
+### Quick Fix (<10 lines, feature branch only)
+
+branch off main first
+
+## Investigation Before Delegation
+
+lead with evidence
+
+## Bug Fixes & Follow-Up
+
+closed beads stay closed
+
+## Agents
+
+- code-reviewer
+
+## Current State
+
+Mid-migration, and this sentence must survive.
+"""
+
+
+def _template_text(name="Demo"):
+    return read_verbatim(TEMPLATES_DIR / "CLAUDE.md").replace("[Project]", name)
+
+
+def _template_region():
+    text = _template_text()
+    start, end = marked_span(text)
+    return text[start:end]
+
+
+def _installed_project(tmp_path, block="## Your Identity\n\nwhat 3.7 shipped\n"):
+    """A CLAUDE.md we installed and nobody has edited since."""
+    region = ("<!-- claude-protocol:begin · managed block -->\n\n"
+              + block + "\n<!-- claude-protocol:end -->")
+    write_verbatim(tmp_path / "CLAUDE.md",
+                   "# Demo\n\n## Project Overview\n\nWe sell widgets.\n\n"
+                   + region + "\n\n## Current State\n\nMid-migration.\n")
+    (tmp_path / ".claude").mkdir(exist_ok=True)
+    return {"files": {}, "regions": {"CLAUDE.md": content_sha256(region)}}
+
+
+class TestClaudeMdSpans:
+    def test_marked_span_covers_both_markers(self):
+        text = ("before\n<!-- claude-protocol:begin -->\nours\n"
+                "<!-- claude-protocol:end -->\nafter\n")
+        start, end = marked_span(text)
+        assert text[start:end] == ("<!-- claude-protocol:begin -->\nours\n"
+                                   "<!-- claude-protocol:end -->")
+
+    def test_marked_span_is_none_without_markers(self):
+        assert marked_span("just a file\n") is None
+
+    def test_marked_span_needs_the_closing_marker(self):
+        """Half a pair is not a block — falling back beats guessing an end."""
+        assert marked_span("<!-- claude-protocol:begin -->\nours\n") is None
+
+    def test_the_shipped_template_carries_the_markers(self):
+        region = _template_region()
+        assert "## Your Identity" in region and "## Agents" in region
+        assert "## Project Overview" not in region, "the user's own section is inside ours"
+        assert "## Current State" not in region, "the user's own section is inside ours"
+
+    def test_unmarked_span_finds_a_v3_block(self):
+        start, end = unmarked_span(LEGACY_CLAUDE_MD)
+        block = LEGACY_CLAUDE_MD[start:end]
+        assert block.startswith("## Your Identity")
+        assert block.endswith("- code-reviewer\n")
+        assert "We sell widgets" not in block
+        assert "Mid-migration" not in block
+
+    def test_unmarked_span_stops_at_a_foreign_heading(self):
+        """A section the user put between ours must never be swallowed."""
+        text = "## Your Identity\n\nours\n\n## Deployment\n\nmine\n\n## Agents\n\nours\n"
+        start, end = unmarked_span(text)
+        assert text[start:end] == "## Your Identity\n\nours\n"
+
+    def test_unmarked_span_keeps_level_three_headings_inside(self):
+        start, end = unmarked_span(LEGACY_CLAUDE_MD)
+        assert "### Quick Fix" in LEGACY_CLAUDE_MD[start:end]
+
+    def test_unmarked_span_is_none_without_our_first_heading(self):
+        assert unmarked_span("# Mine\n\n## Workflow\n\nbeads all the way\n") is None
+
+    def test_splice_keeps_crlf(self):
+        text = ("a\r\n<!-- claude-protocol:begin -->\r\nold\r\n"
+                "<!-- claude-protocol:end -->\r\nb\r\n")
+        out = splice(text, marked_span(text),
+                     "<!-- claude-protocol:begin -->\nnew\n<!-- claude-protocol:end -->")
+        assert "new" in out
+        assert "\n" not in out.replace("\r\n", ""), "a lone LF crept into a CRLF file"
+
+    def test_splice_keeps_lf(self):
+        text = "a\n<!-- claude-protocol:begin -->\nold\n<!-- claude-protocol:end -->\nb\n"
+        out = splice(text, marked_span(text),
+                     "<!-- claude-protocol:begin -->\r\nnew\r\n<!-- claude-protocol:end -->")
+        assert "\r" not in out, "a CR crept into an LF file"
+
+
+class TestClaudeMdBlockIsRefreshed:
+    def test_a_new_file_gets_the_markers_and_is_recorded(self, tmp_path):
+        manifest = {"files": {}}
+
+        update_claude_md(tmp_path, _template_text(), manifest)
+
+        assert marked_span(read_verbatim(tmp_path / "CLAUDE.md")) is not None
+        assert manifest["regions"]["CLAUDE.md"] == content_sha256(_template_region())
+
+    def test_the_block_is_refreshed_without_a_question(self, tmp_path, monkeypatch):
+        manifest = _installed_project(tmp_path)
+        monkeypatch.setattr("builtins.input", _explode)
+
+        update_claude_md(tmp_path, _template_text(), manifest,
+                         bootstrap.ConflictPrompt(interactive=True))
+
+        text = read_verbatim(tmp_path / "CLAUDE.md")
+        assert "what 3.7 shipped" not in text
+        assert "**You are an orchestrator and co-pilot.**" in text
+        assert manifest["regions"]["CLAUDE.md"] == content_sha256(_template_region())
+
+    def test_the_users_own_text_is_left_alone(self, tmp_path):
+        manifest = _installed_project(tmp_path)
+
+        update_claude_md(tmp_path, _template_text(), manifest)
+
+        text = read_verbatim(tmp_path / "CLAUDE.md")
+        assert text.startswith("# Demo\n\n## Project Overview\n\nWe sell widgets.\n\n")
+        assert text.endswith("\n\n## Current State\n\nMid-migration.\n")
+
+    def test_a_crlf_file_stays_crlf(self, tmp_path):
+        manifest = _installed_project(tmp_path)
+        path = tmp_path / "CLAUDE.md"
+        write_verbatim(path, read_verbatim(path).replace("\n", "\r\n"))
+
+        update_claude_md(tmp_path, _template_text(), manifest)
+
+        text = read_verbatim(path)
+        assert "**You are an orchestrator and co-pilot.**" in text
+        assert "\n" not in text.replace("\r\n", ""), "the file was flipped to LF"
+
+    def test_appending_writes_only_our_block(self, tmp_path):
+        write_verbatim(tmp_path / "CLAUDE.md", "# Demo\n\n## Build\n\nmake all\n")
+        manifest = {"files": {}}
+
+        update_claude_md(tmp_path, _template_text(), manifest)
+
+        text = read_verbatim(tmp_path / "CLAUDE.md")
+        assert "## Build" in text and "# Beads Orchestration" in text
+        assert marked_span(text) is not None
+        assert "## Tech Stack" not in text, "the template's own sections leaked in"
+        assert manifest["regions"]["CLAUDE.md"] == content_sha256(_template_region())
+
+
+class TestClaudeMdAsksBeforeTouchingYourEdits:
+    def _edited_inside(self, tmp_path):
+        manifest = _installed_project(tmp_path)
+        path = tmp_path / "CLAUDE.md"
+        write_verbatim(path, read_verbatim(path).replace(
+            "what 3.7 shipped", "what 3.7 shipped, plus a rule I added"))
+        return manifest
+
+    def _legacy(self, tmp_path):
+        write_verbatim(tmp_path / "CLAUDE.md", LEGACY_CLAUDE_MD)
+        (tmp_path / ".claude").mkdir(exist_ok=True)
+        return {"files": {}}
+
+    def test_an_edit_inside_the_block_is_a_question(self, tmp_path, monkeypatch):
+        manifest = self._edited_inside(tmp_path)
+        asked = []
+        monkeypatch.setattr("builtins.input", lambda _: asked.append(1) or "k")
+
+        update_claude_md(tmp_path, _template_text(), manifest,
+                         bootstrap.ConflictPrompt(interactive=True))
+
+        assert asked, "an edited block was replaced without asking"
+        assert "plus a rule I added" in read_verbatim(tmp_path / "CLAUDE.md")
+
+    def test_keeping_your_block_saves_ours_beside_it(self, tmp_path, monkeypatch):
+        manifest = self._edited_inside(tmp_path)
+        monkeypatch.setattr("builtins.input", lambda _: "k")
+
+        update_claude_md(tmp_path, _template_text(), manifest,
+                         bootstrap.ConflictPrompt(interactive=True))
+
+        ours = read_verbatim(tmp_path / ".claude" / ".upgrades" / "CLAUDE.md")
+        assert "**You are an orchestrator and co-pilot.**" in ours
+        assert "We sell widgets." in ours, "the offer dropped the user's own sections"
+
+    def test_taking_our_block_saves_your_whole_file(self, tmp_path, monkeypatch):
+        manifest = self._edited_inside(tmp_path)
+        monkeypatch.setattr("builtins.input", lambda _: "t")
+
+        update_claude_md(tmp_path, _template_text(), manifest,
+                         bootstrap.ConflictPrompt(interactive=True))
+
+        text = read_verbatim(tmp_path / "CLAUDE.md")
+        assert "plus a rule I added" not in text
+        assert "We sell widgets." in text and "Mid-migration." in text
+        mine = read_verbatim(tmp_path / ".claude" / ".upgrades" / "CLAUDE.md.mine")
+        assert "plus a rule I added" in mine
+        assert manifest["regions"]["CLAUDE.md"] == content_sha256(_template_region())
+
+    def test_an_unmarked_block_asks_before_marking(self, tmp_path, monkeypatch):
+        manifest = self._legacy(tmp_path)
+        monkeypatch.setattr("builtins.input", lambda _: "t")
+
+        update_claude_md(tmp_path, _template_text(), manifest,
+                         bootstrap.ConflictPrompt(interactive=True))
+
+        text = read_verbatim(tmp_path / "CLAUDE.md")
+        assert marked_span(text) is not None
+        assert "wording from 3.5" not in text
+        assert "We sell widgets, and only this file says so." in text
+        assert "Mid-migration, and this sentence must survive." in text
+
+    def test_refusing_to_mark_leaves_the_file_alone(self, tmp_path, monkeypatch):
+        manifest = self._legacy(tmp_path)
+        monkeypatch.setattr("builtins.input", lambda _: "k")
+
+        update_claude_md(tmp_path, _template_text(), manifest,
+                         bootstrap.ConflictPrompt(interactive=True))
+
+        assert read_verbatim(tmp_path / "CLAUDE.md") == LEGACY_CLAUDE_MD
+        assert (tmp_path / ".claude" / ".upgrades" / "CLAUDE.md").exists()
+
+    def test_no_terminal_never_asks_and_keeps_your_file(self, tmp_path, monkeypatch):
+        manifest = self._legacy(tmp_path)
+        monkeypatch.setattr("builtins.input", _explode)
+
+        update_claude_md(tmp_path, _template_text(), manifest,
+                         bootstrap.ConflictPrompt(interactive=False))
+
+        assert read_verbatim(tmp_path / "CLAUDE.md") == LEGACY_CLAUDE_MD
+
+    def test_markers_without_a_recorded_hash_are_a_question(self, tmp_path, monkeypatch):
+        """Markers alone do not prove the block is ours.
+
+        The manifest can be lost, unreadable or hand-edited, and a file can
+        quote both marker strings in its own prose. Replacing what sits between
+        them on that evidence deletes text nobody agreed to lose.
+        """
+        manifest = _installed_project(tmp_path)
+        del manifest["regions"]["CLAUDE.md"]
+        asked = []
+        monkeypatch.setattr("builtins.input", lambda _: asked.append(1) or "k")
+
+        update_claude_md(tmp_path, _template_text(), manifest,
+                         bootstrap.ConflictPrompt(interactive=True))
+
+        assert asked, "replaced a block we have no record of installing"
+        assert "what 3.7 shipped" in read_verbatim(tmp_path / "CLAUDE.md")
+
+    def test_prose_quoting_the_markers_is_not_gutted(self, tmp_path, monkeypatch):
+        """A 'how upgrades work' section mentioning both markers is still text."""
+        write_verbatim(tmp_path / "CLAUDE.md",
+                       "# Demo\n\n## How upgrades work\n\n"
+                       "Our block starts at <!-- claude-protocol:begin --> and\n"
+                       "runs to <!-- claude-protocol:end -->, and nothing else moves.\n")
+        (tmp_path / ".claude").mkdir(exist_ok=True)
+        monkeypatch.setattr("builtins.input", _explode)
+
+        update_claude_md(tmp_path, _template_text(), {"files": {}},
+                         bootstrap.ConflictPrompt(interactive=False))
+
+        text = read_verbatim(tmp_path / "CLAUDE.md")
+        assert "runs to <!-- claude-protocol:end -->, and nothing else moves." in text
+
+    def test_an_unreadable_manifest_does_not_cost_you_the_block(self, tmp_path, monkeypatch):
+        """load_manifest swallows a parse error and returns an empty manifest."""
+        _stub_external(monkeypatch)
+        monkeypatch.setattr("builtins.input", _explode)
+        _installed_project(tmp_path, block="## Your Identity\n\nMY OWN RULE: no Friday deploys.\n")
+        (tmp_path / ".claude" / ".manifest.json").write_text("{ broken", encoding="utf-8")
+
+        bootstrap.bootstrap_project(
+            project_dir=tmp_path, project_name="Demo", with_rules=True,
+            lang="en", force=False, upgrade=False, dry_run=False, keep_mine=True,
+        )
+
+        assert "MY OWN RULE" in read_verbatim(tmp_path / "CLAUDE.md")
+
+    def test_force_marks_the_block_without_asking(self, tmp_path, monkeypatch):
+        """--force answers 'take ours' in advance, for CLAUDE.md too."""
+        _stub_external(monkeypatch)
+        monkeypatch.setattr("builtins.input", _explode)
+        write_verbatim(tmp_path / "CLAUDE.md", LEGACY_CLAUDE_MD)
+
+        bootstrap.bootstrap_project(
+            project_dir=tmp_path, project_name="Demo", with_rules=True,
+            lang="en", force=True, upgrade=False, dry_run=False,
+        )
+
+        text = read_verbatim(tmp_path / "CLAUDE.md")
+        assert marked_span(text) is not None
+        assert "Mid-migration, and this sentence must survive." in text
+        assert load_manifest(tmp_path).get("regions", {}).get("CLAUDE.md")
+
+    def test_keep_mine_leaves_the_block_unmarked(self, tmp_path, monkeypatch):
+        _stub_external(monkeypatch)
+        monkeypatch.setattr("builtins.input", _explode)
+        write_verbatim(tmp_path / "CLAUDE.md", LEGACY_CLAUDE_MD)
+
+        bootstrap.bootstrap_project(
+            project_dir=tmp_path, project_name="Demo", with_rules=True,
+            lang="en", force=False, upgrade=False, dry_run=False,
+            keep_mine=True,
+        )
+
+        assert read_verbatim(tmp_path / "CLAUDE.md") == LEGACY_CLAUDE_MD
+
+
+# ============================================================================
+# --force still keeps what it overwrites
+# ============================================================================
+# should_update_file answers "forced" before the conflict prompt is ever
+# reached, so under --force nothing saved the user's version and an edited rule
+# was simply gone. Everywhere else in the upgrade the losing version survives.
+
+
+class TestForceKeepsWhatItOverwrites:
+    def test_an_edited_rule_is_recoverable(self, tmp_path):
+        manifest = _modified_rule(tmp_path, text="my own standard\n")
+        rule = tmp_path / ".claude" / "rules" / "implementation-standard.md"
+        before = read_verbatim(rule)
+
+        _copy_rules(tmp_path, manifest, force=True, dry_run=False)
+
+        assert "IMPLEMENTATION STANDARD" in read_verbatim(rule)
+        mine = tmp_path / ".claude" / ".upgrades" / "rules" / "implementation-standard.md.mine"
+        assert read_verbatim(mine) == before, "the copy is not byte-for-byte"
+
+    def test_an_edited_agent_is_recoverable(self, tmp_path):
+        agents = tmp_path / ".claude" / "agents"
+        agents.mkdir(parents=True)
+        write_verbatim(agents / "code-reviewer.md", "my own reviewer\n")
+        manifest = {"files": {"agents/code-reviewer.md": "sha256:something-else"}}
+
+        bootstrap.copy_agents(tmp_path, "Demo", manifest, True, None, False)
+
+        mine = tmp_path / ".claude" / ".upgrades" / "agents" / "code-reviewer.md.mine"
+        assert read_verbatim(mine) == "my own reviewer\n"
+
+    def test_a_file_you_never_touched_leaves_no_copy(self, tmp_path, monkeypatch):
+        """A .mine for every untouched file would bury the ones that matter."""
+        _stub_external(monkeypatch)
+        bootstrap.bootstrap_project(
+            project_dir=tmp_path, project_name="Demo", with_rules=True,
+            lang="en", force=False, upgrade=False, dry_run=False,
+        )
+
+        bootstrap.bootstrap_project(
+            project_dir=tmp_path, project_name="Demo", with_rules=True,
+            lang="en", force=True, upgrade=False, dry_run=False,
+        )
+
+        upgrades = tmp_path / ".claude" / ".upgrades"
+        assert not list(upgrades.rglob("*.mine"))
+
+    def test_a_preview_with_force_still_writes_nothing(self, tmp_path):
+        manifest = _modified_rule(tmp_path, text="my own standard\n")
+
+        _copy_rules(tmp_path, manifest, force=True, dry_run=True)
+
+        assert not (tmp_path / ".claude" / ".upgrades").exists()
+
+    def test_a_hand_broken_manifest_does_not_crash_the_run(self, tmp_path, monkeypatch):
+        """A hand-edited .manifest.json can carry "files": null."""
+        _stub_external(monkeypatch)
+        _modified_rule(tmp_path, text="my own standard\n")
+        (tmp_path / ".claude" / ".manifest.json").write_text(
+            '{"version": "3.7.0", "files": null}', encoding="utf-8")
+
+        rc = bootstrap.bootstrap_project(
+            project_dir=tmp_path, project_name="Demo", with_rules=True,
+            lang="en", force=True, upgrade=False, dry_run=False,
+        )
+
+        assert rc == 0
+        mine = tmp_path / ".claude" / ".upgrades" / "rules" / "implementation-standard.md.mine"
+        assert mine.exists()
+
+    def test_a_file_that_cannot_be_read_is_not_a_crash(self, tmp_path):
+        """The docstring promises this; the hashing call used to sit outside the try.
+
+        A directory where we ship a file is the honest way to make the read
+        fail on every platform — no mock required.
+        """
+        dest = tmp_path / "rules" / "x.md"
+        dest.mkdir(parents=True)
+
+        assert bootstrap._preserve_before_force(
+            tmp_path, "rules/x.md", dest, {"files": {}}, False) is False
+
+
+# ============================================================================
+# The project-discovery skill is a prompt, not enforcement code
+# ============================================================================
+# It used to be rmtree + copytree, "always overwrite — our code". SKILL.md is
+# text people tune the way they tune a rule, and anything they kept beside it
+# was deleted with no copy, on a plain run with no flags.
+
+
+SKILL_KEY = "skills/project-discovery/SKILL.md"
+
+
+def _installed_skill(tmp_path, text="MY OWN discovery prompt\n"):
+    """A project where the user has edited SKILL.md and left a file beside it."""
+    skill = tmp_path / ".claude" / "skills" / "project-discovery"
+    skill.mkdir(parents=True)
+    write_verbatim(skill / "SKILL.md", text)
+    write_verbatim(skill / "our-notes.md", "notes I keep here\n")
+    return {"files": {SKILL_KEY: "sha256:something-else"}}
+
+
+class TestSkillIsNotBulldozed:
+    def test_a_file_of_yours_beside_it_survives(self, tmp_path):
+        manifest = _installed_skill(tmp_path)
+
+        _copy_rules(tmp_path, manifest, force=False, dry_run=False)
+
+        notes = tmp_path / ".claude" / "skills" / "project-discovery" / "our-notes.md"
+        assert notes.exists(), "a file we never shipped was deleted"
+        assert read_verbatim(notes) == "notes I keep here\n"
+
+    def test_an_edited_skill_is_a_question(self, tmp_path, monkeypatch):
+        manifest = _installed_skill(tmp_path)
+        asked = []
+        monkeypatch.setattr("builtins.input", lambda _: asked.append(1) or "k")
+
+        skipped = _copy_rules(tmp_path, manifest, force=False,
+                    prompt=bootstrap.ConflictPrompt(interactive=True),
+                    dry_run=False)
+
+        assert asked, "an edited SKILL.md was replaced without asking"
+        skill = tmp_path / ".claude" / "skills" / "project-discovery" / "SKILL.md"
+        assert read_verbatim(skill) == "MY OWN discovery prompt\n"
+        assert SKILL_KEY in skipped
+        assert (tmp_path / ".claude" / ".upgrades" / SKILL_KEY).exists()
+
+    def test_taking_ours_saves_yours(self, tmp_path, monkeypatch):
+        manifest = _installed_skill(tmp_path)
+        monkeypatch.setattr("builtins.input", lambda _: "t")
+
+        _copy_rules(tmp_path, manifest, force=False,
+                    prompt=bootstrap.ConflictPrompt(interactive=True),
+                    dry_run=False)
+
+        skill = tmp_path / ".claude" / "skills" / "project-discovery" / "SKILL.md"
+        assert "MY OWN" not in read_verbatim(skill)
+        mine = tmp_path / ".claude" / ".upgrades" / (SKILL_KEY + ".mine")
+        assert read_verbatim(mine) == "MY OWN discovery prompt\n"
+
+    def test_no_terminal_keeps_your_version(self, tmp_path, monkeypatch):
+        manifest = _installed_skill(tmp_path)
+        monkeypatch.setattr("builtins.input", _explode)
+
+        _copy_rules(tmp_path, manifest, force=False,
+                    prompt=bootstrap.ConflictPrompt(interactive=False),
+                    dry_run=False)
+
+        skill = tmp_path / ".claude" / "skills" / "project-discovery" / "SKILL.md"
+        assert read_verbatim(skill) == "MY OWN discovery prompt\n"
+
+    def test_force_replaces_it_and_keeps_a_copy(self, tmp_path):
+        manifest = _installed_skill(tmp_path)
+
+        _copy_rules(tmp_path, manifest, force=True, dry_run=False)
+
+        skill = tmp_path / ".claude" / "skills" / "project-discovery" / "SKILL.md"
+        assert "MY OWN" not in read_verbatim(skill)
+        mine = tmp_path / ".claude" / ".upgrades" / (SKILL_KEY + ".mine")
+        assert read_verbatim(mine) == "MY OWN discovery prompt\n"
+
+    def test_a_preview_writes_nothing(self, tmp_path):
+        manifest = _installed_skill(tmp_path)
+        before = read_verbatim(tmp_path / ".claude" / "skills" / "project-discovery" / "SKILL.md")
+
+        _copy_rules(tmp_path, manifest, force=True, dry_run=True)
+
+        skill = tmp_path / ".claude" / "skills" / "project-discovery" / "SKILL.md"
+        assert read_verbatim(skill) == before
+        assert not (tmp_path / ".claude" / ".upgrades").exists()
+
+    def test_an_untouched_skill_is_updated_silently(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("builtins.input", _explode)
+        manifest = {"files": {}}
+
+        _copy_rules(tmp_path, manifest, force=False, dry_run=False)
+
+        skill = tmp_path / ".claude" / "skills" / "project-discovery" / "SKILL.md"
+        assert skill.exists()
+        assert manifest["files"][SKILL_KEY] == file_sha256(skill)
+
+
+# ============================================================================
+# .upgrades/<path>.mine keeps every version it was handed
+# ============================================================================
+# Our version in .upgrades/<path> can be a single slot — it ships with the
+# package and is always recoverable. Theirs is not.
+
+
+class TestReplacedVersionsAccumulate:
+    def test_a_second_different_version_does_not_clobber_the_first(self, tmp_path):
+        bootstrap.save_replaced_version(tmp_path, "rules/x.md", "edit A\n")
+        bootstrap.save_replaced_version(tmp_path, "rules/x.md", "edit B\n")
+
+        saved = sorted(p.name for p in
+                       (tmp_path / ".claude" / ".upgrades" / "rules").iterdir())
+        assert len(saved) == 2, saved
+        contents = {read_verbatim(tmp_path / ".claude" / ".upgrades" / "rules" / n)
+                    for n in saved}
+        assert contents == {"edit A\n", "edit B\n"}
+        assert read_verbatim(
+            tmp_path / ".claude" / ".upgrades" / "rules" / "x.md.mine") == "edit B\n"
+
+    def test_a_failed_write_does_not_cost_you_the_older_copy(self, tmp_path, monkeypatch):
+        """Nothing is destroyed before the copy that replaces it exists."""
+        bootstrap.save_replaced_version(tmp_path, "rules/x.md", "edit A\n")
+        mine = tmp_path / ".claude" / ".upgrades" / "rules" / "x.md.mine"
+        real = bootstrap.write_verbatim
+
+        def fail_on_the_spare(path, text):
+            if path != mine:
+                raise PermissionError("locked")
+            return real(path, text)
+
+        monkeypatch.setattr(bootstrap, "write_verbatim", fail_on_the_spare)
+
+        with pytest.raises(PermissionError):
+            bootstrap.save_replaced_version(tmp_path, "rules/x.md", "edit B\n")
+
+        assert read_verbatim(mine) == "edit A\n", "the older copy was destroyed"
+
+    def test_an_unreadable_older_copy_is_left_where_it_is(self, tmp_path):
+        """Bytes we cannot decode are still the user's text — put ours beside them."""
+        mine = tmp_path / ".claude" / ".upgrades" / "rules" / "x.md.mine"
+        mine.parent.mkdir(parents=True)
+        mine.write_bytes(b"\xff\xfe not utf-8 at all")
+
+        bootstrap.save_replaced_version(tmp_path, "rules/x.md", "edit B\n")
+
+        assert mine.read_bytes() == b"\xff\xfe not utf-8 at all"
+        saved = [p for p in mine.parent.iterdir() if p != mine]
+        assert len(saved) == 1 and read_verbatim(saved[0]) == "edit B\n"
+
+    def test_the_same_version_twice_leaves_one_file(self, tmp_path):
+        bootstrap.save_replaced_version(tmp_path, "rules/x.md", "same\n")
+        bootstrap.save_replaced_version(tmp_path, "rules/x.md", "same\n")
+
+        saved = list((tmp_path / ".claude" / ".upgrades" / "rules").iterdir())
+        assert len(saved) == 1, [p.name for p in saved]
+
+    def test_two_rounds_of_force_keep_both_edits(self, tmp_path, monkeypatch):
+        _stub_external(monkeypatch)
+        rule = tmp_path / ".claude" / "rules" / "implementation-standard.md"
+
+        def force_run():
+            bootstrap.bootstrap_project(
+                project_dir=tmp_path, project_name="Demo", with_rules=True,
+                lang="en", force=True, upgrade=False, dry_run=False,
+            )
+
+        force_run()
+        write_verbatim(rule, "EDIT A: six months of tuning\n")
+        force_run()
+        write_verbatim(rule, "EDIT B: a different note\n")
+        force_run()
+
+        kept = {read_verbatim(p) for p in
+                (tmp_path / ".claude" / ".upgrades" / "rules").iterdir() if p.is_file()}
+        assert "EDIT A: six months of tuning\n" in kept, "the first edit was clobbered"
+        assert "EDIT B: a different note\n" in kept
+
+
+# ============================================================================
+# --dry-run and beads
+# ============================================================================
+# Every copy step honours the flag; install_beads never took it, so a preview
+# of a project without .beads/ created the directory and shelled out to bd.
+
+
+class _FakeRun:
+    returncode = 0
+    stdout = ""
+    stderr = ""
+
+
+class TestDryRunDoesNotInstallBeads:
+    def test_preview_neither_creates_beads_nor_shells_out(self, tmp_path, monkeypatch):
+        ran = []
+        monkeypatch.setattr(bootstrap.subprocess, "run",
+                            lambda cmd, *a, **kw: ran.append(cmd) or _FakeRun())
+        monkeypatch.setattr(bootstrap.shutil, "which", lambda name: "bd")
+        monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda pd: None)
+
+        rc = bootstrap.bootstrap_project(
+            project_dir=tmp_path, project_name="Demo", with_rules=True,
+            lang="en", force=False, upgrade=False, dry_run=True,
+        )
+
+        assert rc == 0
+        assert ran == [], f"a preview ran {ran}"
+        assert list(tmp_path.rglob("*")) == [], "a preview created files"
+
+    def test_preview_does_not_create_the_project_directory(self, tmp_path, monkeypatch):
+        """Zero bytes is not zero writes: the mkdir ran before the flag was read."""
+        monkeypatch.setattr(bootstrap.subprocess, "run",
+                            lambda cmd, *a, **kw: _FakeRun())
+        monkeypatch.setattr(bootstrap.shutil, "which", lambda name: "bd")
+        monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda pd: None)
+        target = tmp_path / "not" / "there" / "yet"
+
+        rc = bootstrap.bootstrap_project(
+            project_dir=target, project_name="Demo", with_rules=True,
+            lang="en", force=False, upgrade=False, dry_run=True,
+        )
+
+        assert rc == 0
+        assert not target.exists()
+
+    def test_a_real_run_still_installs(self, tmp_path, monkeypatch):
+        ran = []
+        monkeypatch.setattr(bootstrap.subprocess, "run",
+                            lambda cmd, *a, **kw: ran.append(cmd) or _FakeRun())
+        monkeypatch.setattr(bootstrap.shutil, "which", lambda name: "bd")
+
+        assert bootstrap.install_beads(tmp_path) is True
+        assert ran, "a real run did not call bd at all"
+
+
+# ============================================================================
+# --all: a batch upgrade does not interrogate
+# ============================================================================
+# README has always said a batch upgrade keeps your files and saves ours beside
+# them. The code only checked isatty, so upgrading twenty projects from your own
+# terminal meant twenty rounds of questions.
+
+
+class TestBatchUpgradeDoesNotAsk:
+    def _run(self, tmp_path, monkeypatch, force=False):
+        (tmp_path / "proj" / ".beads").mkdir(parents=True, exist_ok=True)
+        prompts = []
+        monkeypatch.setattr(bootstrap, "_stdin_is_a_person", lambda: True)
+        _stub_heavy_steps(monkeypatch)
+
+        def record(project_dir, with_rules, lang, manifest, force_, prompt=None,
+                   *args, **kwargs):
+            prompts.append(prompt)
+            return []
+
+        monkeypatch.setattr(bootstrap, "copy_rules_and_skills", record)
+        bootstrap.run_batch_upgrade(tmp_path, True, "en", force, False)
+        assert len(prompts) == 1
+        return prompts[0]
+
+    def test_no_questions_even_at_a_terminal(self, tmp_path, monkeypatch):
+        prompt = self._run(tmp_path, monkeypatch)
+
+        assert not prompt.will_ask
+        assert prompt.ask("rules/x.md", tmp_path, "ours") == bootstrap.ConflictPrompt.KEEP
+
+    def test_force_still_takes_ours(self, tmp_path, monkeypatch):
+        prompt = self._run(tmp_path, monkeypatch, force=True)
+
+        assert not prompt.will_ask
+        assert prompt.ask("rules/x.md", tmp_path, "ours") == bootstrap.ConflictPrompt.TAKE
+
+    def test_the_banner_says_what_will_actually_happen(self, tmp_path, monkeypatch,
+                                                       capsys):
+        """One line tells the operator what is about to hit twenty projects."""
+        self._run(tmp_path, monkeypatch)
+        kept = capsys.readouterr().out
+
+        self._run(tmp_path, monkeypatch, force=True)
+        forced = capsys.readouterr().out
+
+        assert "Files you edited are kept" in kept
+        assert "Files you edited are kept" not in forced, "banner contradicts --force"
+        assert "Taking our version of every file" in forced
+
+
+class TestClaudeMdDryRunWritesNothing:
+    def _start(self, tmp_path, kind):
+        if kind == "installed":
+            return _installed_project(tmp_path)
+        if kind == "legacy":
+            write_verbatim(tmp_path / "CLAUDE.md", LEGACY_CLAUDE_MD)
+        elif kind == "plain":
+            write_verbatim(tmp_path / "CLAUDE.md", "# Demo\n\n## Build\n\nmake all\n")
+        elif kind == "unknown":
+            write_verbatim(tmp_path / "CLAUDE.md",
+                           "# Mine\n\n## Workflow\n\nbeads all the way\n")
+        return {"files": {}}
+
+    @pytest.mark.parametrize("kind",
+                             ["missing", "installed", "legacy", "plain", "unknown"])
+    def test_every_path_writes_nothing(self, tmp_path, monkeypatch, kind):
+        manifest = self._start(tmp_path, kind)
+        monkeypatch.setattr("builtins.input", _explode)
+        before = _snapshot(tmp_path)
+
+        update_claude_md(tmp_path, _template_text(), manifest,
+                         bootstrap.ConflictPrompt(interactive=False), dry_run=True)
+
+        after = _snapshot(tmp_path)
+        assert after == before
+        assert ("CLAUDE.md" in manifest.get("regions", {})) is (kind == "installed")
