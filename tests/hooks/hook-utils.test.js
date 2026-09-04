@@ -247,3 +247,110 @@ describe('splitCommandSegments', () => {
     expect(splitCommandSegments('')).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// execCommand argument passing
+// ---------------------------------------------------------------------------
+// An args array combined with `shell: true` is concatenated, not escaped —
+// that is what Node's DEP0190 warns about. Measured on Windows: a space splits
+// one argument into two, quotes are stripped, `^` disappears, `%VAR%` expands,
+// and `&&`, `|`, `>` execute as shell operators. These tests pin the fix down:
+// every argument must reach the program exactly as it was written.
+
+const { spawnSync } = require('child_process');
+
+/** A throwaway script that prints each argv entry on its own line. */
+function makeArgvPrinter() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cp-argv-'));
+  const file = path.join(dir, 'argv-print.js');
+  fs.writeFileSync(file, 'process.argv.slice(2).forEach((a, i) => console.log(i + "=<" + a + ">"));\n');
+  return file;
+}
+
+/** Split output on newlines without caring which line ending the OS used. */
+function lines(out) {
+  return String(out).split(/\r?\n/);
+}
+
+const onWindows = process.platform === 'win32';
+
+describe('execCommand argument passing', () => {
+  // process.execPath is "C:\Program Files\nodejs\node.exe" on Windows, so this
+  // also covers a program whose own path contains a space.
+  const printer = makeArgvPrinter();
+
+  it('keeps an argument containing a space as one argument', () => {
+    expect(lines(execCommand(process.execPath, [printer, 'two words'])))
+      .toEqual(['0=<two words>']);
+  });
+
+  it('does not let shell operators inside an argument run as commands', () => {
+    expect(lines(execCommand(process.execPath, [printer, 'zzz && echo PWNED'])))
+      .toEqual(['0=<zzz && echo PWNED>']);
+    expect(lines(execCommand(process.execPath, [printer, 'zzz | echo PWNED'])))
+      .toEqual(['0=<zzz | echo PWNED>']);
+  });
+
+  it('keeps quotes, carets and percent signs intact', () => {
+    expect(lines(execCommand(process.execPath, [printer, 'say "hi"', 'a^b', '%PATH%'])))
+      .toEqual(['0=<say "hi">', '1=<a^b>', '2=<%PATH%>']);
+  });
+
+  it('finds a repository whose path contains a space', () => {
+    const repo = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cp-space-')), 'dir with space');
+    fs.mkdirSync(repo, { recursive: true });
+    expect(execCommand('git', ['init', '-q', repo])).not.toBeNull();
+
+    const root = execCommand('git', ['-C', repo, 'rev-parse', '--show-toplevel']);
+    expect(root).not.toBeNull();
+    expect(fs.realpathSync(root)).toBe(fs.realpathSync(repo));
+  });
+
+  // Guards the retry, not the old bug: a failed direct spawn now falls through
+  // to cmd.exe, which must not turn "no such program" into an empty string.
+  it('returns null for a program that does not exist', () => {
+    expect(execCommand('cp-no-such-tool-xyz', ['--version'])).toBeNull();
+  });
+
+  /** A .cmd wrapper on PATH that forwards its arguments to the argv printer. */
+  function wrapperOnPath() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cp-wrapper-'));
+    fs.writeFileSync(path.join(dir, 'cp-printer.cmd'),
+      `@echo off\r\n"${process.execPath}" "${printer}" %*\r\n`);
+    return { env: { ...process.env, PATH: dir + path.delimiter + process.env.PATH } };
+  }
+
+  // .cmd/.bat wrappers cannot be spawned directly at all (Node refuses with
+  // EINVAL/ENOENT), so they are the one case that still goes through cmd.exe —
+  // and therefore the one case where a shell parser sees the arguments.
+  // Windows-only by nature.
+  (onWindows ? it : it.skip)('runs a .cmd wrapper and keeps its arguments intact', () => {
+    const out = execCommand(
+      'cp-printer',
+      ['two words', 'a^b', 'C:\\Users\\R&D\\project', 'say "hi"'],
+      wrapperOnPath(),
+    );
+    expect(lines(out)).toEqual([
+      '0=<two words>', '1=<a^b>', '2=<C:\\Users\\R&D\\project>', '3=<say "hi">',
+    ]);
+  });
+
+  // Node quotes an argument only when it contains whitespace, so a
+  // metacharacter with no spaces around it reaches cmd.exe bare — `x&&echo.>f`
+  // used to run as a second command and really created the file.
+  (onWindows ? it : it.skip)('does not let a .cmd wrapper argument run a second command', () => {
+    const opts = wrapperOnPath();
+    const mark = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cp-mark-')), 'INJECTED.txt');
+
+    const out = execCommand('cp-printer', [`x&&echo.>${mark}`, `y>${mark}`], opts);
+
+    expect(fs.existsSync(mark)).toBe(false);
+    expect(lines(out)).toEqual([`0=<x&&echo.>${mark}>`, `1=<y>${mark}>`]);
+  });
+
+  it('writes nothing to stderr — no DEP0190 deprecation noise', () => {
+    const script = `require(${JSON.stringify(utilsPath)}).execCommand('git', ['--version']);`;
+    const res = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8' });
+    expect(res.stderr).toBe('');
+  });
+});
