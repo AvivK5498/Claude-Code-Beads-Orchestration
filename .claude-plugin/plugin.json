@@ -13,6 +13,7 @@
     "./templates/agents/code-reviewer.md",
     "./templates/agents/merge-supervisor.md"
   ],
+  "commands": ["./commands/init.md"],
   "skills": "./templates/skills",
   "hooks": "./hooks/hooks.json"
 }

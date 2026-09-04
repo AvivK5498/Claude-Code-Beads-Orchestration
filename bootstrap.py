@@ -1394,7 +1394,8 @@ def copy_hooks(installer: Installer) -> None:
 
 
 def copy_rules_and_skills(with_rules: bool, lang: str,
-                          installer: Installer) -> None:
+                          installer: Installer,
+                          with_skill: bool = True) -> None:
     """Copy beads-workflow rule, project-discovery skill, and optional dev rules."""
     print("\n[4/6] Copying rules and skills...")
 
@@ -1419,7 +1420,8 @@ def copy_rules_and_skills(with_rules: bool, lang: str,
                 installer.install(f"rules/{src.name}", read_verbatim(src),
                                   note=note)
 
-    copy_skill(installer)
+    if with_skill:
+        copy_skill(installer)
     print("  DONE")
 
 
@@ -1438,6 +1440,70 @@ def copy_skill(installer: Installer) -> None:
     for src in sorted(p for p in skill_src.rglob("*") if p.is_file()):
         rel = str(src.relative_to(skill_src)).replace("\\", "/")
         installer.install(f"skills/project-discovery/{rel}", read_verbatim(src))
+
+
+# ============================================================================
+# Handing the executable half over to the plugin
+# ============================================================================
+# Installed as a plugin, Claude Code loads the hooks, agents and skill itself.
+# A copy of them left in the project does not sit quietly beside the plugin:
+# hooks merge from every source, so each one fires twice.
+
+
+def plugin_provided_relpaths() -> list:
+    """What the plugin supplies, as paths from the project root.
+
+    Project-root paths, not manifest keys — that is what _cleanup_file needs to
+    find the file, and it translates to the manifest key itself. Derived rather
+    than listed, so a new hook or agent cannot be provided by the plugin and
+    left behind in projects at the same time.
+    """
+    rels = [f".claude/hooks/{p.name}"
+            for p in sorted((TEMPLATES_DIR / "hooks").glob("*.cjs"))]
+    rels += [f".claude/agents/{p.name}"
+             for p in sorted((TEMPLATES_DIR / "agents").glob("*.md"))]
+    skill_src = TEMPLATES_DIR / "skills" / "project-discovery"
+    if skill_src.exists():
+        rels += [
+            ".claude/skills/project-discovery/"
+            + str(p.relative_to(skill_src)).replace("\\", "/")
+            for p in sorted(skill_src.rglob("*")) if p.is_file()
+        ]
+    return rels
+
+
+def hand_over_to_plugin(project_dir: Path, manifest: dict,
+                        dry_run: bool = False) -> dict:
+    """Remove the copies the plugin now provides, and unwire our hooks.
+
+    Only files this project's manifest says we installed are touched, and each
+    one is copied into .claude/.upgrades/<timestamp>/obsolete/ first. A file
+    someone else put there is not ours to remove.
+    """
+    report = {"removed": [], "unwired": []}
+    upgrades_root = project_dir / ".claude" / ".upgrades" / _upgrade_timestamp()
+    state = {"created": False}
+
+    def backup_fn() -> Path:
+        target = upgrades_root / "obsolete"
+        if not state["created"] and not dry_run:
+            target.mkdir(parents=True, exist_ok=True)
+            state["created"] = True
+        return target
+
+    for rel in plugin_provided_relpaths():
+        if _cleanup_file(rel, project_dir, manifest, backup_fn, dry_run):
+            report["removed"].append(rel)
+
+    hook_names = [Path(rel).name for rel in plugin_provided_relpaths()
+                  if rel.startswith(".claude/hooks/")]
+    for name in ("settings.json", "settings.local.json"):
+        settings_path = project_dir / ".claude" / name
+        if settings_path.exists():
+            report["unwired"] += _strip_obsolete_hooks(
+                settings_path, hook_names, backup_fn, dry_run,
+            )
+    return report
 
 
 # ============================================================================
@@ -1680,17 +1746,23 @@ def _replace_unparseable_settings(project_dir: Path, dest: Path, src: Path,
 
 
 def copy_settings_and_claude_md(project_name: str,
-                                installer: Installer) -> None:
-    """Copy settings.json (merge hooks) and refresh our block in CLAUDE.md."""
+                                installer: Installer,
+                                with_settings: bool = True) -> None:
+    """Copy settings.json (merge hooks) and refresh our block in CLAUDE.md.
+
+    `with_settings` is off when the plugin supplies the hooks: writing our
+    entries into the project would then run every hook twice.
+    """
     print("\n[5/6] Copying settings and CLAUDE.md...")
 
-    _install_settings(installer)
+    if with_settings:
+        _install_settings(installer)
 
-    # --- settings.local.json: same stale-path rewrite, never templated ---
-    migrated = ([] if installer.dry_run
-                else migrate_local_settings_hooks(installer.project_dir))
-    for old_cmd, _ in migrated:
-        print(f"  - settings.local.json: rewrote hook path: {old_cmd[:70]}")
+        # --- settings.local.json: same stale-path rewrite, never templated ---
+        migrated = ([] if installer.dry_run
+                    else migrate_local_settings_hooks(installer.project_dir))
+        for old_cmd, _ in migrated:
+            print(f"  - settings.local.json: rewrote hook path: {old_cmd[:70]}")
 
     # --- CLAUDE.md: refresh our marked block, leave the rest of the file alone ---
     claude_src = TEMPLATES_DIR / "CLAUDE.md"
@@ -1787,10 +1859,24 @@ def _print_cleanup_report(report: dict, dry_run: bool) -> None:
         print("  nothing to clean")
 
 
+def _report_handover(report: dict, dry_run: bool) -> None:
+    """Say what the plugin took over, file by file. Silence would leave someone
+    wondering where their hooks went."""
+    if not (report["removed"] or report["unwired"]):
+        return
+    print(f"\n{_dry(dry_run)}Handed over to the plugin:")
+    for rel in report["removed"]:
+        print(f"  - removed {rel}")
+    for command in report["unwired"]:
+        print(f"  - unwired hook: {str(command)[:70]}")
+    print("  (copies of everything removed are in .claude/.upgrades/)")
+
+
 def bootstrap_project(
     project_dir: Path, project_name: str | None, with_rules: bool,
     lang: str, force: bool, upgrade: bool, dry_run: bool,
     keep_mine: bool = False, install_bd: bool = False,
+    project_only: bool = False,
 ) -> int:
     """Run bootstrap for a single project. Returns exit code (0 = success)."""
     if not dry_run:
@@ -1847,11 +1933,19 @@ def bootstrap_project(
     if not install_beads(project_dir, dry_run, install_bd):
         return 1
 
-    copy_agents(resolved_name, installer)
-    copy_hooks(installer)
-    copy_rules_and_skills(with_rules, lang, installer)
-    copy_settings_and_claude_md(resolved_name, installer)
+    # Installed as a plugin, Claude Code loads the hooks, agents and skill
+    # itself; a copy of them in the project makes every hook fire twice.
+    if not project_only:
+        copy_agents(resolved_name, installer)
+        copy_hooks(installer)
+    copy_rules_and_skills(with_rules, lang, installer, with_skill=not project_only)
+    copy_settings_and_claude_md(resolved_name, installer,
+                                with_settings=not project_only)
     setup_gitignore(installer)
+
+    if project_only:
+        _report_handover(hand_over_to_plugin(project_dir, manifest, dry_run),
+                         dry_run)
 
     # Read version from package.json (same package as bootstrap.py)
     pkg_json = SCRIPT_DIR / "package.json"
@@ -1976,6 +2070,7 @@ def main():
     parser.add_argument("--upgrade", action="store_true", help="Run init flow then cleanup obsolete items (uses existing manifest)")
     parser.add_argument("--dry-run", action="store_true", help="Print plan without writing anything")
     parser.add_argument("--install-beads", dest="install_bd", action="store_true", help="Install the beads CLI without asking (default: ask, and install nothing when nobody can answer)")
+    parser.add_argument("--project-only", dest="project_only", action="store_true", help="Install only what a plugin cannot carry: beads, rules, CLAUDE.md. Hooks, agents and the skill come from the plugin, and copies of them already in the project are removed")
     parser.add_argument("--all", dest="all_parent", default=None, metavar="PARENT_DIR", help="Batch upgrade: iterate direct subdirs of PARENT_DIR that contain .beads/. Implies --upgrade.")
     args = parser.parse_args()
 
@@ -1991,7 +2086,7 @@ def main():
         project_dir=project_dir, project_name=args.project_name,
         with_rules=args.with_rules, lang=args.lang, force=args.force,
         upgrade=args.upgrade, dry_run=args.dry_run, keep_mine=args.keep_mine,
-        install_bd=args.install_bd,
+        install_bd=args.install_bd, project_only=args.project_only,
     ))
 
 
