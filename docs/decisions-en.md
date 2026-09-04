@@ -142,14 +142,16 @@ Every decision made during the v2 → v3 rewrite. Context, alternatives, rationa
 
 **Why:** "I'll fix it later" = never. A bead won't be forgotten.
 
-### 3.7 LEARNED comments — specific, not formal
+### 3.7 A memory is specific, not formal
 
-**Decision:** LEARNED comment must contain: problem → solution → context.
+**Decision:** What gets written down must contain: problem → solution → context.
 
-**BAD:** `LEARNED: fixed async issue`
-**GOOD:** `LEARNED: pg connection pool exhaustion under load → set max=20 and idle_timeout=30s. Default max=10 caused 503s at >50 rps`
+**BAD:** `bd remember "fixed async issue"`
+**GOOD:** `bd remember "pg connection pool exhaustion under load → set max=20 and idle_timeout=30s. Default max=10 caused 503s at >50 rps"`
 
-**Why:** Vague entries are useless for recall. Specific ones are found by keywords and contain ready solutions.
+**Why:** A vague entry is useless when searching. A specific one is found by keyword and carries a ready solution.
+
+**Since 3.3.0:** this used to be a `LEARNED:` prefix on a bead comment, read back by `recall.cjs`. bd grew `bd remember` and `bd memories`, so neither the prefix nor the reader exists any more — the rule about what makes an entry worth keeping does.
 
 ### 3.8 bd command reference in rules
 
@@ -161,19 +163,21 @@ Every decision made during the v2 → v3 rewrite. Context, alternatives, rationa
 
 ## 4. Knowledge Base
 
-### 4.1 Recall before every investigation
+### 4.1 Search the memory before every investigation
 
-**Decision:** Before any investigation — mandatory `node .beads/memory/recall.cjs "keyword"`.
+**Decision:** Before any investigation — mandatory `bd memories "keyword"`.
 
 **Why:** Without this, Claude re-solves problems that were already solved in previous sessions.
+
+**Since 3.3.0:** the command was `node .beads/memory/recall.cjs "keyword"` against a `knowledge.jsonl` of our own. bd's built-in memory replaced both, so we now ship neither the reader nor the store — which is 4.2 applied a second time, to ourselves.
 
 ### 4.2 docs/issues/*.md — rejected
 
 **Discussed:** Creating a markdown note after each closed task.
 
-**Decision:** Not doing it. Beads + LEARNED comments + recall.cjs cover this without duplication.
+**Decision:** Not doing it. Beads and `bd remember` cover this without duplication.
 
-**Why:** `bd show {ID}` + `bd comments {ID}` already contain everything. Markdown = double work with no additional value for the agent.
+**Why:** `bd show {ID}` + `bd comments {ID}` already contain everything. Markdown = double work with no additional value for the agent. A second place to write things down is a second place to forget to look.
 
 ---
 
@@ -236,8 +240,7 @@ Every decision made during the v2 → v3 rewrite. Context, alternatives, rationa
 ```
 npx claude-protocol init
   |
-  +-- .beads/                    # Task database (Dolt/SQLite)
-  |   +-- memory/knowledge.jsonl # Knowledge base
+  +-- .beads/                    # Tasks and memories (Dolt/SQLite)
   |
   +-- .claude/
   |   +-- agents/
