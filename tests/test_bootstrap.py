@@ -2360,6 +2360,154 @@ class TestForceKeepsWhatItOverwrites:
 
 
 # ============================================================================
+# The project-discovery skill is a prompt, not enforcement code
+# ============================================================================
+# It used to be rmtree + copytree, "always overwrite — our code". SKILL.md is
+# text people tune the way they tune a rule, and anything they kept beside it
+# was deleted with no copy, on a plain run with no flags.
+
+
+SKILL_KEY = "skills/project-discovery/SKILL.md"
+
+
+def _installed_skill(tmp_path, text="MY OWN discovery prompt\n"):
+    """A project where the user has edited SKILL.md and left a file beside it."""
+    skill = tmp_path / ".claude" / "skills" / "project-discovery"
+    skill.mkdir(parents=True)
+    write_verbatim(skill / "SKILL.md", text)
+    write_verbatim(skill / "our-notes.md", "notes I keep here\n")
+    return {"files": {SKILL_KEY: "sha256:something-else"}}
+
+
+class TestSkillIsNotBulldozed:
+    def test_a_file_of_yours_beside_it_survives(self, tmp_path):
+        manifest = _installed_skill(tmp_path)
+
+        copy_rules_and_skills(tmp_path, True, "en", manifest, False, None, False)
+
+        notes = tmp_path / ".claude" / "skills" / "project-discovery" / "our-notes.md"
+        assert notes.exists(), "a file we never shipped was deleted"
+        assert read_verbatim(notes) == "notes I keep here\n"
+
+    def test_an_edited_skill_is_a_question(self, tmp_path, monkeypatch):
+        manifest = _installed_skill(tmp_path)
+        asked = []
+        monkeypatch.setattr("builtins.input", lambda _: asked.append(1) or "k")
+
+        skipped = copy_rules_and_skills(tmp_path, True, "en", manifest, False,
+                                        bootstrap.ConflictPrompt(interactive=True), False)
+
+        assert asked, "an edited SKILL.md was replaced without asking"
+        skill = tmp_path / ".claude" / "skills" / "project-discovery" / "SKILL.md"
+        assert read_verbatim(skill) == "MY OWN discovery prompt\n"
+        assert SKILL_KEY in skipped
+        assert (tmp_path / ".claude" / ".upgrades" / SKILL_KEY).exists()
+
+    def test_taking_ours_saves_yours(self, tmp_path, monkeypatch):
+        manifest = _installed_skill(tmp_path)
+        monkeypatch.setattr("builtins.input", lambda _: "t")
+
+        copy_rules_and_skills(tmp_path, True, "en", manifest, False,
+                              bootstrap.ConflictPrompt(interactive=True), False)
+
+        skill = tmp_path / ".claude" / "skills" / "project-discovery" / "SKILL.md"
+        assert "MY OWN" not in read_verbatim(skill)
+        mine = tmp_path / ".claude" / ".upgrades" / (SKILL_KEY + ".mine")
+        assert read_verbatim(mine) == "MY OWN discovery prompt\n"
+
+    def test_no_terminal_keeps_your_version(self, tmp_path, monkeypatch):
+        manifest = _installed_skill(tmp_path)
+        monkeypatch.setattr("builtins.input", _explode)
+
+        copy_rules_and_skills(tmp_path, True, "en", manifest, False,
+                              bootstrap.ConflictPrompt(interactive=False), False)
+
+        skill = tmp_path / ".claude" / "skills" / "project-discovery" / "SKILL.md"
+        assert read_verbatim(skill) == "MY OWN discovery prompt\n"
+
+    def test_force_replaces_it_and_keeps_a_copy(self, tmp_path):
+        manifest = _installed_skill(tmp_path)
+
+        copy_rules_and_skills(tmp_path, True, "en", manifest, True, None, False)
+
+        skill = tmp_path / ".claude" / "skills" / "project-discovery" / "SKILL.md"
+        assert "MY OWN" not in read_verbatim(skill)
+        mine = tmp_path / ".claude" / ".upgrades" / (SKILL_KEY + ".mine")
+        assert read_verbatim(mine) == "MY OWN discovery prompt\n"
+
+    def test_a_preview_writes_nothing(self, tmp_path):
+        manifest = _installed_skill(tmp_path)
+        before = read_verbatim(tmp_path / ".claude" / "skills" / "project-discovery" / "SKILL.md")
+
+        copy_rules_and_skills(tmp_path, True, "en", manifest, True, None, True)
+
+        skill = tmp_path / ".claude" / "skills" / "project-discovery" / "SKILL.md"
+        assert read_verbatim(skill) == before
+        assert not (tmp_path / ".claude" / ".upgrades").exists()
+
+    def test_an_untouched_skill_is_updated_silently(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("builtins.input", _explode)
+        manifest = {"files": {}}
+
+        copy_rules_and_skills(tmp_path, True, "en", manifest, False, None, False)
+
+        skill = tmp_path / ".claude" / "skills" / "project-discovery" / "SKILL.md"
+        assert skill.exists()
+        assert manifest["files"][SKILL_KEY] == file_sha256(skill)
+
+
+# ============================================================================
+# .upgrades/<path>.mine keeps every version it was handed
+# ============================================================================
+# Our version in .upgrades/<path> can be a single slot — it ships with the
+# package and is always recoverable. Theirs is not.
+
+
+class TestReplacedVersionsAccumulate:
+    def test_a_second_different_version_does_not_clobber_the_first(self, tmp_path):
+        bootstrap.save_replaced_version(tmp_path, "rules/x.md", "edit A\n")
+        bootstrap.save_replaced_version(tmp_path, "rules/x.md", "edit B\n")
+
+        saved = sorted(p.name for p in
+                       (tmp_path / ".claude" / ".upgrades" / "rules").iterdir())
+        assert len(saved) == 2, saved
+        contents = {read_verbatim(tmp_path / ".claude" / ".upgrades" / "rules" / n)
+                    for n in saved}
+        assert contents == {"edit A\n", "edit B\n"}
+        assert read_verbatim(
+            tmp_path / ".claude" / ".upgrades" / "rules" / "x.md.mine") == "edit B\n"
+
+    def test_the_same_version_twice_leaves_one_file(self, tmp_path):
+        bootstrap.save_replaced_version(tmp_path, "rules/x.md", "same\n")
+        bootstrap.save_replaced_version(tmp_path, "rules/x.md", "same\n")
+
+        saved = list((tmp_path / ".claude" / ".upgrades" / "rules").iterdir())
+        assert len(saved) == 1, [p.name for p in saved]
+
+    def test_two_rounds_of_force_keep_both_edits(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(bootstrap, "install_beads", lambda pd, *a, **kw: True)
+        monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda pd: None)
+        rule = tmp_path / ".claude" / "rules" / "implementation-standard.md"
+
+        def force_run():
+            bootstrap.bootstrap_project(
+                project_dir=tmp_path, project_name="Demo", with_rules=True,
+                lang="en", force=True, upgrade=False, dry_run=False,
+            )
+
+        force_run()
+        write_verbatim(rule, "EDIT A: six months of tuning\n")
+        force_run()
+        write_verbatim(rule, "EDIT B: a different note\n")
+        force_run()
+
+        kept = {read_verbatim(p) for p in
+                (tmp_path / ".claude" / ".upgrades" / "rules").iterdir() if p.is_file()}
+        assert "EDIT A: six months of tuning\n" in kept, "the first edit was clobbered"
+        assert "EDIT B: a different note\n" in kept
+
+
+# ============================================================================
 # --dry-run and beads
 # ============================================================================
 # Every copy step honours the flag; install_beads never took it, so a preview

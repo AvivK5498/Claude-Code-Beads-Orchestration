@@ -117,13 +117,13 @@ CLAUDE.md                   # Orchestrator instructions
 
 First install and re-install use the same command: `npx claude-protocol init`.
 
-- **Hooks and skills** — always updated to the latest version (enforcement code).
-- **Rules and agents** — updated only if you haven't modified them. Modified files are preserved; the new version is saved to `.claude/.upgrades/` for manual review.
+- **Hooks** — always updated to the latest version (enforcement code). Only files we ship are replaced; a hook of your own is untouched.
+- **Rules, agents and the project-discovery skill** — updated only if you haven't modified them. A file you edited becomes a question; the version you don't pick is kept under `.claude/.upgrades/`. Files of your own inside the skill directory are never touched.
 - **CLAUDE.md** — only the block between `<!-- claude-protocol:begin -->` and `<!-- claude-protocol:end -->` is ours, and only that block is refreshed. Your overview, tech stack and current state are never touched.
 - **settings.json** — hooks merged by event type. Your existing hooks stay.
 - **.gitignore** — missing entries appended. Nothing removed.
 
-Use `--force` to take our version of every file. Rules, agents and the CLAUDE.md block are copied to `.claude/.upgrades/<path>.mine` first, so the version you replace is still there. Hooks and the project-discovery skill are replaced outright with no copy — they are our code, and they are replaced on every run anyway.
+Use `--force` to take our version of every file. Rules, agents, the skill and the CLAUDE.md block are copied to `.claude/.upgrades/<path>.mine` first, and an earlier copy is never overwritten, so every version you replace is still there. Hooks are replaced outright with no copy — they are enforcement code, replaced on every run anyway.
 
 ### What happens at session start
 
@@ -322,7 +322,7 @@ A: Restart Claude Code. Hooks load from `settings.json` at startup.
 A: `beads-workflow.md` includes a full command reference table. If Claude still invents commands, it didn't read the rules — check that `.claude/rules/` exists.
 
 **Q: What happens if I run `init` again after updating claude-protocol?**
-A: Rules and agents you edited become a question, one file at a time, with a diff on request; the version you do not pick is kept under `.claude/.upgrades/`. Hooks and skills are always updated. In CLAUDE.md only our marked block is refreshed — the rest of the file stays yours. `--force` and `--keep-mine` answer for everything up front.
+A: Rules, agents and the skill you edited become a question, one file at a time, with a diff on request; the version you do not pick is kept under `.claude/.upgrades/`. Hooks are always updated. In CLAUDE.md only our marked block is refreshed — the rest of the file stays yours. `--force` and `--keep-mine` answer for everything up front.
 
 **Q: Can I use this without Dolt?**
 A: Yes. Beads works with SQLite by default. Dolt adds version history and branching for the task database.

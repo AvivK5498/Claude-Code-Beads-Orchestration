@@ -443,6 +443,30 @@ def save_upgrade(project_dir: Path, relative_path: str, content: str) -> None:
     write_verbatim(dest, content)
 
 
+def save_replaced_version(project_dir: Path, rel_key: str, content: str) -> None:
+    """Save the version we are about to replace, never overwriting an earlier one.
+
+    Our version in .upgrades/<rel> may be a single slot: it ships with the
+    package and can always be had again. The user's cannot, so a .mine that
+    already holds something else is moved aside instead of being written over.
+    Identical content is not saved twice — that would only add noise.
+    """
+    dest = project_dir / ".claude" / ".upgrades" / (rel_key + ".mine")
+    if dest.exists():
+        try:
+            if read_verbatim(dest) == content:
+                return
+        except Exception:
+            pass  # unreadable: keep it anyway, it is still the user's text
+        stamp, n = _upgrade_timestamp(), 0
+        older = dest.with_name(f"{dest.name}.{stamp}")
+        while older.exists():
+            n += 1
+            older = dest.with_name(f"{dest.name}.{stamp}-{n}")
+        dest.rename(older)
+    write_verbatim(dest, content)
+
+
 PromptWording = namedtuple("PromptWording", "headline keep take")
 
 # Most conflicts are "you edited this file and we ship a new one". CLAUDE.md is
@@ -559,7 +583,7 @@ def _preserve_before_force(project_dir: Path, rel_key: str, dest: Path,
     try:
         if file_sha256(dest) == ((manifest or {}).get("files") or {}).get(rel_key):
             return False
-        save_upgrade(project_dir, rel_key + ".mine", read_verbatim(dest))
+        save_replaced_version(project_dir, rel_key, read_verbatim(dest))
     except Exception:
         return False  # unreadable file: overwriting is still what --force means
     return True
@@ -593,7 +617,7 @@ def _resolve_modified(prompt, project_dir: Path, rel_key: str, dest: Path,
     if prompt.ask(rel_key, dest, new_text, wording) == ConflictPrompt.TAKE:
         if not dry_run:
             try:
-                save_upgrade(project_dir, rel_key + ".mine", read_verbatim(dest))
+                save_replaced_version(project_dir, rel_key, read_verbatim(dest))
             except Exception:
                 pass  # unreadable file: taking ours is still the user's choice
         return True
@@ -1176,23 +1200,49 @@ def copy_rules_and_skills(
                     print(f"  - rules/{rule_file.name} (yours kept)")
                     print(f"    {_dry(dry_run)}Ours saved to: .claude/.upgrades/{rel_key}")
 
-    # Project discovery skill (always overwrite — our code)
-    skills_dir = project_dir / ".claude" / "skills"
-    skill_src = TEMPLATES_DIR / "skills" / "project-discovery"
-    if skill_src.exists():
-        dest = skills_dir / "project-discovery"
-        if not dry_run:
-            if dest.exists():
-                shutil.rmtree(dest)
-            shutil.copytree(skill_src, dest)
-            # Record skill files in manifest
-            for skill_file in dest.rglob("*"):
-                if skill_file.is_file():
-                    rel_key = str(skill_file.relative_to(project_dir / ".claude")).replace("\\", "/")
-                    manifest["files"][rel_key] = file_sha256(skill_file)
-        print(f"  - {_dry(dry_run)}skills/project-discovery/")
+    skipped += copy_skill(project_dir, manifest, force, prompt, dry_run)
 
     print("  DONE")
+    return skipped
+
+
+def copy_skill(project_dir: Path, manifest: dict, force: bool = False,
+               prompt=None, dry_run: bool = False) -> list:
+    """Copy the project-discovery skill, one file at a time.
+
+    It used to be rmtree + copytree, on the grounds that the directory is our
+    code. It is not: SKILL.md is a prompt people tune the way they tune a rule,
+    and anything they kept beside it was deleted with no copy — on a plain run,
+    no flag, no question. So each file we ship goes through the same question a
+    rule does, and a file we do not ship is left where its owner put it.
+    """
+    skill_src = TEMPLATES_DIR / "skills" / "project-discovery"
+    if not skill_src.exists():
+        return []
+    skipped = []
+    for src in sorted(p for p in skill_src.rglob("*") if p.is_file()):
+        rel = str(src.relative_to(skill_src)).replace("\\", "/")
+        rel_key = f"skills/project-discovery/{rel}"
+        dest = project_dir / ".claude" / rel_key
+        ok, reason = should_update_file(dest, rel_key, manifest, force)
+        if not ok:
+            ok = _resolve_modified(prompt, project_dir, rel_key, dest,
+                                   read_verbatim(src), dry_run=dry_run)
+            reason = "replaced on request" if ok else reason
+        if ok:
+            if reason == "forced" and _preserve_before_force(
+                    project_dir, rel_key, dest, manifest, dry_run):
+                print(f"    yours saved to: .claude/.upgrades/{rel_key}.mine")
+            if not dry_run:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dest)
+                manifest["files"][rel_key] = file_sha256(dest)
+            print(f"  - {_dry(dry_run)}{rel_key}"
+                  + (f" ({reason})" if reason != "new" else ""))
+        else:
+            skipped.append(rel_key)
+            print(f"  - {rel_key} (yours kept)")
+            print(f"    {_dry(dry_run)}Ours saved to: .claude/.upgrades/{rel_key}")
     return skipped
 
 
