@@ -10,10 +10,20 @@
 
 ## How to publish a new version
 
-1. Update version in `package.json`
+1. Update the version in **three files** — `package.json`,
+   `.claude-plugin/plugin.json`, and both `version` fields in
+   `.claude-plugin/marketplace.json` (`metadata.version` and the plugin entry).
+   A marketplace entry whose version does not grow leaves every plugin user on
+   the copy in their cache, so the release simply does not reach them.
+   `TestPluginManifests::test_one_version_in_three_places` fails when they
+   disagree — run the tests before tagging and it cannot be forgotten.
 2. Commit: `git commit -am "release: v3.x.x"`
 3. Tag: `git tag v3.x.x`
 4. Push: `git push && git push --tags`
+
+The GitHub release the tag creates is also what the session-start update check
+reads, so a version that never becomes a release is a version nobody is told
+about.
 
 GitHub Action (`.github/workflows/release.yml`) will:
 - Run vitest + pytest

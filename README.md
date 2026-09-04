@@ -113,6 +113,10 @@ CLAUDE.md                   # Orchestrator instructions
 .beads/                     # Task database + knowledge base
 ```
 
+That is the `npx` install. As a plugin, only `rules/`, `.manifest.json`,
+`CLAUDE.md` and `.beads/` land in the project — the hooks, the agents and the
+skill stay in the plugin, which is what lets them update on their own.
+
 ### Safe for existing projects — and for upgrades
 
 First install and re-install use the same command: `npx claude-protocol init`.
@@ -179,6 +183,39 @@ session-start hook repeats the warning once per session. Nothing is updated for
 you — the rules need `bd memories`, `bd remember`, `bd worktree` and `bd prime`,
 and an old `bd` fails those one at a time with no explanation.
 
+### Install as a plugin
+
+The same thing, installed through Claude Code's own plugin system. The plugin
+carries the hooks, the agents and the project-discovery skill, and updates them
+for you. What a plugin cannot carry is the half that has to live in the
+project — the beads database, `.claude/rules/*.md` and the block in
+`CLAUDE.md` — so one command lays that half down.
+
+```
+/plugin marketplace add weselow/claude-protocol
+/plugin install claude-protocol@claude-protocol
+/claude-protocol:init
+```
+
+Choose the scope when installing: **user** for every project you open,
+**project** to share it with everyone on the repository through
+`.claude/settings.json`, **local** for this repository and only you. The hooks
+stand down in any project that has no `.beads/`, so user scope does not police
+your unrelated repositories.
+
+**Auto-update is off by default** for a third-party marketplace — the plugin
+stays at the version you installed until you turn it on in `/plugin` →
+**Marketplaces** → **claude-protocol** → **Enable auto-update**. Whether it is
+on or off, the session-start hook tells you once a week when a newer version is
+out.
+
+**Already installed with `npx`?** Run `/claude-protocol:init` after enabling the
+plugin. Hooks merge from every source, so the copies in `.claude/hooks/` would
+fire alongside the plugin's and every check would run twice. The command removes
+the copies it installed, unwires them from `settings.json`, and lists what it
+took; copies of everything removed go to `.claude/.upgrades/`. Files you added
+yourself are left alone.
+
 ### Options
 
 | Flag | Description |
@@ -190,6 +227,7 @@ and an old `bd` fails those one at a time with no explanation.
 | `--force` | Take our version of every file, no questions asked (yours is kept in `.claude/.upgrades/`) |
 | `--keep-mine` | Keep your version of every file you edited, no questions asked |
 | `--install-beads` | Install the beads CLI without asking (default: ask, and install nothing when nobody can answer) |
+| `--project-only` | Install only what a plugin cannot carry — beads, rules, CLAUDE.md — and hand hooks, agents and the skill over to the plugin. This is what `/claude-protocol:init` runs |
 
 ### Local development (before npm publish)
 
