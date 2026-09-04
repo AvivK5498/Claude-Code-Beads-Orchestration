@@ -613,21 +613,55 @@ class Installer:
         self.prompt = prompt
         self.dry_run = dry_run
         self.skipped = []
+        self.clashes = []
 
     def path(self, rel_key: str) -> Path:
         """Where a manifest key lives. One rule for both, so a file and the
         hash recorded for it can never end up describing different places."""
         return self.project_dir / ".claude" / rel_key
 
+    def blocked_by(self, dest: Path) -> str | None:
+        """What stands in the way of writing dest, or None when nothing does.
+
+        Two shapes, both of them something a person made: a directory named
+        like a file we ship, and a plain file named like a directory of ours.
+        Hashing the first raises, creating the second raises, and the traceback
+        used to take the whole upgrade down with it.
+        """
+        if dest.exists() and not dest.is_file():
+            return "a directory sits where we ship a file"
+        for parent in dest.parents:
+            if parent == self.project_dir:
+                break
+            if parent.exists() and not parent.is_dir():
+                inside = str(parent.relative_to(self.project_dir)).replace("\\", "/")
+                return f"{inside} is a file, and our files go inside it"
+        return None
+
+    def clash(self, rel_key: str, label: str, why: str) -> None:
+        """Report what we found and move on, leaving it exactly where it is.
+
+        Never overwritten, never deleted, and never a reason to abandon the
+        rest of the run: half an upgrade applied because of a traceback is
+        worse than one file left uninstalled.
+        """
+        self.clashes.append((rel_key, why))
+        print(f"  - {label} (skipped — {why})")
+
     def install(self, rel_key: str, text: str, *,
                 label: str = None, note: str = "") -> None:
         """Install one file we ship, or keep the one the project already has.
 
-        What was kept instead of installed lands in self.skipped, and the run's
-        closing report reads it from there.
+        What was kept instead of installed lands in self.skipped, what could
+        not be installed at all in self.clashes, and the run's closing report
+        reads both from there.
         """
         dest = self.path(rel_key)
         label = label or rel_key
+        blocked = self.blocked_by(dest)
+        if blocked:
+            self.clash(rel_key, label, blocked)
+            return
         ok, reason = should_update_file(dest, rel_key, self.manifest, self.force)
         if not ok:
             ok = self.resolve(rel_key, dest, text)
@@ -1358,6 +1392,10 @@ def update_claude_md(template_text: str, installer: Installer) -> None:
         _write_claude_md(installer, template_text, region)
         print(f"  - {_dry(installer.dry_run)}CLAUDE.md (created)")
         return
+    if not dest.is_file():  # a directory of that name — reading it raises
+        installer.clash("CLAUDE.md", "CLAUDE.md",
+                        "a directory sits where the file goes")
+        return
     if region is None:  # the template lost its markers — never guess
         _hand_over_template(installer, template_text, "template has no markers")
         return
@@ -1623,6 +1661,12 @@ def bootstrap_project(
             print(f"    - {rel}")
             print(f"      {_dry(dry_run)}Ours is next to it: .claude/.upgrades/{rel}")
         print("    Re-run with --force to take ours for all of them.")
+
+    if installer.clashes:
+        print(f"\n  {len(installer.clashes)} file(s) we could not install:")
+        for rel, why in installer.clashes:
+            print(f"    - {rel} — {why}")
+        print("    Nothing there was touched. Move it aside and run again.")
 
     # Post-upgrade health check — never fatal
     if upgrade and not dry_run:

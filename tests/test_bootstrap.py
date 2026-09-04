@@ -2435,6 +2435,164 @@ class TestSkillIsNotBulldozed:
 
 
 # ============================================================================
+# Something a person made stands where one of our files goes
+# ============================================================================
+# A directory named like a file we ship, or a plain file named like one of our
+# directories. Hashing the first raised, creating the second raised, and the
+# traceback took the whole run down with it — settings.json, CLAUDE.md and the
+# manifest were never written, so half an upgrade was applied and the person
+# was left with a stack trace instead of a sentence.
+
+
+def _run_bootstrap(tmp_path, monkeypatch, **kw):
+    """A full run with only the steps that leave the process stubbed out."""
+    _stub_external(monkeypatch)
+    monkeypatch.setattr("builtins.input", _explode)
+    opts = dict(project_name="Demo", with_rules=True, lang="en",
+                force=False, upgrade=False, dry_run=False)
+    opts.update(kw)
+    return bootstrap.bootstrap_project(project_dir=tmp_path, **opts)
+
+
+def _finished(tmp_path):
+    """Both of these land after every copy step: proof the run was not cut off."""
+    return ((tmp_path / ".claude" / "settings.json").exists()
+            and load_manifest(tmp_path).get("installed_at") is not None)
+
+
+@pytest.mark.parametrize("kind", list(MANAGED))
+class TestADirectoryWhereOurFileGoes:
+    def test_the_rest_of_the_upgrade_still_lands(self, tmp_path, kind, monkeypatch):
+        """The manifest knowing the key is what sent should_update_file hashing."""
+        rel_key = MANAGED[kind]
+        (tmp_path / ".claude" / rel_key).mkdir(parents=True)
+        save_manifest(tmp_path, {"files": {rel_key: "sha256:whatever"}})
+
+        rc = _run_bootstrap(tmp_path, monkeypatch)
+
+        assert rc == 0
+        assert _finished(tmp_path), "the upgrade stopped half-way"
+
+    def test_what_is_inside_it_is_untouched(self, tmp_path, kind, monkeypatch):
+        rel_key = MANAGED[kind]
+        theirs = tmp_path / ".claude" / rel_key
+        theirs.mkdir(parents=True)
+        write_verbatim(theirs / "note.txt", "a file they put there\n")
+        save_manifest(tmp_path, {"files": {rel_key: "sha256:whatever"}})
+
+        _run_bootstrap(tmp_path, monkeypatch)
+
+        assert theirs.is_dir(), "we replaced a directory of theirs with our file"
+        assert read_verbatim(theirs / "note.txt") == "a file they put there\n"
+
+    def test_force_does_not_reach_the_write(self, tmp_path, kind, monkeypatch):
+        """--force answers before the manifest is read, so it used to crash on
+        the write itself rather than on the hash."""
+        rel_key = MANAGED[kind]
+        theirs = tmp_path / ".claude" / rel_key
+        theirs.mkdir(parents=True)
+
+        rc = _run_bootstrap(tmp_path, monkeypatch, force=True)
+
+        assert rc == 0
+        assert theirs.is_dir()
+        assert _finished(tmp_path), "the upgrade stopped half-way"
+
+    def test_a_preview_says_so_too(self, tmp_path, kind, monkeypatch):
+        rel_key = MANAGED[kind]
+        (tmp_path / ".claude" / rel_key).mkdir(parents=True)
+        save_manifest(tmp_path, {"files": {rel_key: "sha256:whatever"}})
+        before = _snapshot(tmp_path)
+
+        rc = _run_bootstrap(tmp_path, monkeypatch, dry_run=True)
+
+        assert rc == 0
+        assert _snapshot(tmp_path) == before
+
+    def test_the_closing_report_names_it(self, tmp_path, kind, monkeypatch, capsys):
+        rel_key = MANAGED[kind]
+        (tmp_path / ".claude" / rel_key).mkdir(parents=True)
+
+        _run_bootstrap(tmp_path, monkeypatch, force=True)
+
+        out = capsys.readouterr().out
+        assert "we could not install" in out
+        assert rel_key in out.split("we could not install")[1]
+
+
+class TestAFileWhereOurDirectoryGoes:
+    """The blocker is not the destination but one of its parents, so a check on
+    the destination alone would walk straight past it."""
+
+    @pytest.mark.parametrize("rel_dir", ["rules", "agents",
+                                         "skills/project-discovery"])
+    def test_the_rest_of_the_upgrade_still_lands(self, tmp_path, monkeypatch,
+                                                 rel_dir):
+        blocker = tmp_path / ".claude" / rel_dir
+        blocker.parent.mkdir(parents=True, exist_ok=True)
+        write_verbatim(blocker, "a file they put there\n")
+
+        rc = _run_bootstrap(tmp_path, monkeypatch)
+
+        assert rc == 0
+        assert _finished(tmp_path), "the upgrade stopped half-way"
+        assert read_verbatim(blocker) == "a file they put there\n"
+
+
+class TestADirectoryWhereClaudeMdGoes:
+    """CLAUDE.md never goes through Installer.install, so it needs its own."""
+
+    def test_the_rest_of_the_upgrade_still_lands(self, tmp_path, monkeypatch):
+        (tmp_path / "CLAUDE.md").mkdir()
+
+        rc = _run_bootstrap(tmp_path, monkeypatch)
+
+        assert rc == 0
+        assert (tmp_path / "CLAUDE.md").is_dir()
+        assert _finished(tmp_path), "the upgrade stopped half-way"
+
+    def test_it_is_named_in_the_closing_report(self, tmp_path, monkeypatch, capsys):
+        (tmp_path / "CLAUDE.md").mkdir()
+
+        _run_bootstrap(tmp_path, monkeypatch)
+
+        out = capsys.readouterr().out
+        assert "CLAUDE.md" in out.split("we could not install")[1]
+
+
+class TestAFileEditedIntoInvalidUtf8:
+    """Reported with pzd, but every read of the user's file was already
+    wrapped; the loops read our own template, which is always valid UTF-8."""
+
+    def test_a_plain_run_keeps_it_and_carries_on(self, tmp_path, monkeypatch):
+        rules = tmp_path / ".claude" / "rules"
+        rules.mkdir(parents=True)
+        theirs = rules / "tdd-workflow.md"
+        theirs.write_bytes(b"\xff\xfe not utf-8 \x80\n")
+        save_manifest(tmp_path, {"files": {"rules/tdd-workflow.md": "sha256:stale"}})
+
+        rc = _run_bootstrap(tmp_path, monkeypatch)
+
+        assert rc == 0
+        assert theirs.read_bytes() == b"\xff\xfe not utf-8 \x80\n"
+        assert _finished(tmp_path)
+
+    def test_force_replaces_it_without_a_crash(self, tmp_path, monkeypatch):
+        """The copy aside cannot be made — decoding it is what fails — and
+        --force still means take ours."""
+        rules = tmp_path / ".claude" / "rules"
+        rules.mkdir(parents=True)
+        theirs = rules / "tdd-workflow.md"
+        theirs.write_bytes(b"\xff\xfe not utf-8 \x80\n")
+
+        rc = _run_bootstrap(tmp_path, monkeypatch, force=True)
+
+        assert rc == 0
+        assert "TDD" in read_verbatim(theirs)
+        assert _finished(tmp_path)
+
+
+# ============================================================================
 # .upgrades/<path>.mine keeps every version it was handed
 # ============================================================================
 # Our version in .upgrades/<path> can be a single slot — it ships with the
