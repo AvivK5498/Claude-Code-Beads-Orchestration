@@ -373,11 +373,16 @@ def write_verbatim(path: Path, text: str) -> None:
 # MANIFEST (upgrade tracking)
 # ============================================================================
 
+def content_sha256_bytes(data: bytes) -> str:
+    """Return hex SHA-256 digest of raw bytes."""
+    h = hashlib.sha256()
+    h.update(data)
+    return f"sha256:{h.hexdigest()}"
+
+
 def file_sha256(path: Path) -> str:
     """Return hex SHA-256 digest of a file's contents."""
-    h = hashlib.sha256()
-    h.update(path.read_bytes())
-    return f"sha256:{h.hexdigest()}"
+    return content_sha256_bytes(path.read_bytes())
 
 
 def content_sha256(content: str) -> str:
@@ -427,20 +432,23 @@ def should_update_file(
         return True, "forced"
     if not file_path.exists():
         return True, "new"
-    current_hash = file_sha256(file_path)
-    recorded_hash = (manifest.get("files") or {}).get(relative_key)
+    recorded_hash = manifest.get("files", {}).get(relative_key)
     if recorded_hash is None:
         # Legacy install — treat as user-modified (safe default)
         return False, "no_manifest"
-    if current_hash == recorded_hash:
+    if file_sha256(file_path) == recorded_hash:
         return True, "unchanged"
     return False, "modified"
 
 
+def upgrades_path(project_dir: Path, relative_path: str) -> Path:
+    """Where a version we are not installing is kept for the user to look at."""
+    return project_dir / ".claude" / ".upgrades" / relative_path
+
+
 def save_upgrade(project_dir: Path, relative_path: str, content: str) -> None:
     """Save new version of a user-modified file to .claude/.upgrades/."""
-    dest = project_dir / ".claude" / ".upgrades" / relative_path
-    write_verbatim(dest, content)
+    write_verbatim(upgrades_path(project_dir, relative_path), content)
 
 
 def _free_spare_slot(dest: Path) -> Path:
@@ -462,7 +470,7 @@ def save_replaced_version(project_dir: Path, rel_key: str, content: str) -> None
     a step that destroys before its replacement exists can fail in between.
     Identical content is not saved twice; that would only add noise.
     """
-    dest = project_dir / ".claude" / ".upgrades" / (rel_key + ".mine")
+    dest = upgrades_path(project_dir, rel_key + ".mine")
     if not dest.exists():
         write_verbatim(dest, content)
         return
@@ -491,7 +499,7 @@ FILE_CONFLICT = PromptWording(
 )
 
 CLAUDE_MD_UNMARKED = PromptWording(
-    headline=("CLAUDE.md — our instructions are in there unmarked.\n"
+    headline=("{rel} — our instructions are in there unmarked.\n"
               "    Marking them lets every upgrade refresh just that block and "
               "leave the rest of your file alone."),
     keep="leave it alone   (ours goes to .claude/.upgrades/CLAUDE.md)",
@@ -499,7 +507,7 @@ CLAUDE_MD_UNMARKED = PromptWording(
 )
 
 CLAUDE_MD_EDITED = PromptWording(
-    headline=("CLAUDE.md — what sits between our markers is not what we installed:\n"
+    headline=("{rel} — what sits between our markers is not what we installed:\n"
               "    either it was edited, or we have no record of installing it."),
     keep="keep your block  (ours goes to .claude/.upgrades/CLAUDE.md)",
     take="take our block   (yours goes to .claude/.upgrades/CLAUDE.md.mine)",
@@ -563,7 +571,7 @@ class ConflictPrompt:
 
     def _show_diff(self, rel_key: str, current: Path, new_text: str) -> None:
         try:
-            old_text = current.read_text(encoding="utf-8")
+            old_text = read_verbatim(current)
         except Exception as e:
             print(f"  cannot read {rel_key}: {e}")
             return
@@ -593,9 +601,10 @@ def _preserve_before_force(project_dir: Path, rel_key: str, dest: Path,
     if dry_run or not dest.exists():
         return False
     try:
-        if file_sha256(dest) == ((manifest or {}).get("files") or {}).get(rel_key):
+        raw = dest.read_bytes()
+        if content_sha256_bytes(raw) == manifest.get("files", {}).get(rel_key):
             return False
-        save_replaced_version(project_dir, rel_key, read_verbatim(dest))
+        save_replaced_version(project_dir, rel_key, raw.decode("utf-8"))
     except Exception:
         return False  # unreadable file: overwriting is still what --force means
     return True
@@ -1001,10 +1010,11 @@ def install_beads(project_dir: Path, dry_run: bool = False) -> bool:
     if dry_run:
         # A preview writes nothing and shells out to nothing. This step used to
         # ignore the flag and create .beads/ on the project it was previewing.
-        have_bd = bool(shutil.which("bd"))
-        print(f"  - beads CLI {'already installed' if have_bd else 'would be installed'}")
+        print("  - beads CLI "
+              + ("already installed" if shutil.which("bd") else "would be installed"))
         if not (project_dir / ".beads").exists():
             print("  - [DRY-RUN] would run 'bd init' in this project")
+        print("  - [DRY-RUN] would run 'bd config set export.git-add false'")
         print("  DONE")
         return True
 
@@ -1101,7 +1111,7 @@ def copy_agents(
         dest = agents_dir / agent_file.name
         rel_key = f"agents/{agent_file.name}"
         ok, reason = should_update_file(dest, rel_key, manifest, force)
-        new_content = agent_file.read_text(encoding="utf-8")
+        new_content = read_verbatim(agent_file)
         for placeholder, value in replacements.items():
             new_content = new_content.replace(placeholder, value)
         if not ok:
@@ -1120,6 +1130,7 @@ def copy_agents(
         else:
             skipped.append(rel_key)
             print(f"  - {agent_file.name} (yours kept)")
+            print(f"    {_dry(dry_run)}Ours saved to: .claude/.upgrades/{rel_key}")
     print("  DONE")
     return skipped
 
@@ -1168,8 +1179,7 @@ def copy_rules_and_skills(
         ok, reason = should_update_file(dest, rel_key, manifest, force)
         if not ok:
             ok = _resolve_modified(prompt, project_dir, rel_key, dest,
-                                   beads_src.read_text(encoding="utf-8"),
-                                   dry_run=dry_run)
+                                   read_verbatim(beads_src), dry_run=dry_run)
             reason = "replaced on request" if ok else reason
         if ok:
             if reason == "forced" and _preserve_before_force(
@@ -1194,7 +1204,7 @@ def copy_rules_and_skills(
                 ok, reason = should_update_file(dest, rel_key, manifest, force)
                 if not ok:
                     ok = _resolve_modified(prompt, project_dir, rel_key, dest,
-                                           rule_file.read_text(encoding="utf-8"),
+                                           read_verbatim(rule_file),
                                            dry_run=dry_run)
                     reason = "replaced on request" if ok else reason
                 if ok:
@@ -1279,16 +1289,20 @@ CLAUDE_MD_BLOCK_HEADINGS = {
     "Bug Fixes & Follow-Up", "Knowledge Base", "Agents",
 }
 
-_CLAUDE_MD_NOTE = {
-    "marked": "our block refreshed",
-    "unmarked": "our block marked and refreshed",
-    "appended": "our block appended",
-}
+# What update_claude_md decided to do. `wording` None means replacing destroys
+# nothing a person wrote, and only then does it go ahead without asking.
+ClaudeMdPlan = namedtuple("ClaudeMdPlan", "text note wording")
 
 
 def _lf(text: str) -> str:
     """Line endings normalised, so a CRLF checkout hashes like an LF one."""
     return text.replace("\r\n", "\n")
+
+
+def _in_style_of(text: str, addition: str) -> str:
+    """`addition` written in the line endings `text` already uses."""
+    addition = _lf(addition)
+    return addition.replace("\n", "\r\n") if "\r\n" in text else addition
 
 
 def marked_span(text: str) -> tuple:
@@ -1338,46 +1352,37 @@ def unmarked_span(text: str) -> tuple:
 
 def splice(text: str, span: tuple, region: str) -> str:
     """Replace text[span] with region, in the line endings the file already uses."""
-    region = _lf(region)
-    if "\r\n" in text:
-        region = region.replace("\n", "\r\n")
-    return text[:span[0]] + region + text[span[1]:]
+    return text[:span[0]] + _in_style_of(text, region) + text[span[1]:]
 
 
-def _claude_md_proposal(current: str, region: str) -> tuple:
-    """(whole proposed file, kind) for a CLAUDE.md that already exists.
+def _claude_md_plan(current: str, region: str, manifest: dict):
+    """What to write over an existing CLAUDE.md, or None when we cannot tell.
 
-    kind is "marked" (our region is in there), "unmarked" (our block is there
-    without markers), "appended" (nothing of ours yet) or "unknown"
-    (orchestration text we cannot delimit — nothing is proposed for that one).
+    `wording` is None when replacing destroys nothing a person wrote, and that
+    is the only case that goes ahead without asking: either the file carries no
+    block of ours yet, or the marked region hashes to what we last installed.
+
+    A recorded hash is the only proof of that. Without one the markers could be
+    anything — a lost or unreadable manifest, a pair typed by hand, a file whose
+    own prose quotes both marker strings — and replacing what sits between them
+    would delete text nobody agreed to lose. So: no hash, no silent replacement.
     """
     span = marked_span(current)
     if span:
-        return splice(current, span, region), "marked"
+        recorded = (manifest.get("regions") or {}).get("CLAUDE.md")
+        ours = bool(recorded) and content_sha256(
+            _lf(current[span[0]:span[1]])) == recorded
+        return ClaudeMdPlan(splice(current, span, region), "our block refreshed",
+                            None if ours else CLAUDE_MD_EDITED)
     span = unmarked_span(current)
     if span:
-        return splice(current, span, region), "unmarked"
+        return ClaudeMdPlan(splice(current, span, region),
+                            "our block marked and refreshed", CLAUDE_MD_UNMARKED)
     if "## Workflow" in current and "beads" in current.lower():
-        return None, "unknown"
-    addition = "\n\n---\n\n# Beads Orchestration\n\n" + _lf(region) + "\n"
-    if "\r\n" in current:
-        addition = addition.replace("\n", "\r\n")
-    return current.rstrip("\r\n") + addition, "appended"
-
-
-def _block_is_ours(current: str, manifest: dict) -> bool:
-    """True when the marked region is what we last installed, byte for byte.
-
-    Only a recorded hash proves that. Without one the markers could be anything
-    — a lost or unreadable manifest, a pair typed by hand, a file whose prose
-    quotes both marker strings — and replacing what sits between them would
-    delete text nobody agreed to lose. So: no hash, no silent replacement.
-    """
-    span = marked_span(current)
-    recorded = manifest.get("claude_md_block")
-    if not span or not recorded:
-        return False
-    return content_sha256(_lf(current[span[0]:span[1]])) == recorded
+        return None  # orchestration text we cannot delimit
+    addition = _in_style_of(
+        current, "\n\n---\n\n# Beads Orchestration\n\n" + region + "\n")
+    return ClaudeMdPlan(current.rstrip("\r\n") + addition, "our block appended", None)
 
 
 def _write_claude_md(dest: Path, text: str, region: str, manifest: dict,
@@ -1386,7 +1391,8 @@ def _write_claude_md(dest: Path, text: str, region: str, manifest: dict,
     if dry_run:
         return
     write_verbatim(dest, text)
-    manifest["claude_md_block"] = content_sha256(_lf(region))
+    if region is not None:
+        manifest.setdefault("regions", {})["CLAUDE.md"] = content_sha256(_lf(region))
 
 
 def _hand_over_template(project_dir: Path, template_text: str, why: str,
@@ -1407,7 +1413,7 @@ def update_claude_md(project_dir: Path, template_text: str, manifest: dict = Non
     region = template_text[span[0]:span[1]] if span else None
 
     if not dest.exists():
-        _write_claude_md(dest, template_text, region or template_text, manifest, dry_run)
+        _write_claude_md(dest, template_text, region, manifest, dry_run)
         print(f"  - {_dry(dry_run)}CLAUDE.md (created)")
         return
     if region is None:  # the template lost its markers — never guess
@@ -1415,23 +1421,72 @@ def update_claude_md(project_dir: Path, template_text: str, manifest: dict = Non
         return
 
     current = read_verbatim(dest)
-    proposed, kind = _claude_md_proposal(current, region)
-    if kind == "unknown":
+    plan = _claude_md_plan(current, region, manifest)
+    if plan is None:
         _hand_over_template(project_dir, template_text,
                             "our block is not marked and not recognisable", dry_run)
         return
-
-    # Nothing of ours in the file yet, or our block still exactly as installed:
-    # replacing it destroys nothing, so it needs no question.
-    silent = kind == "appended" or (kind == "marked" and _block_is_ours(current, manifest))
-    wording = CLAUDE_MD_EDITED if kind == "marked" else CLAUDE_MD_UNMARKED
-    if not silent and not _resolve_modified(prompt, project_dir, "CLAUDE.md", dest,
-                                            proposed, wording=wording, dry_run=dry_run):
+    if plan.wording and not _resolve_modified(prompt, project_dir, "CLAUDE.md", dest,
+                                              plan.text, wording=plan.wording,
+                                              dry_run=dry_run):
         print("  - CLAUDE.md (yours kept)")
         print(f"    {_dry(dry_run)}Ours saved to: .claude/.upgrades/CLAUDE.md")
         return
-    _write_claude_md(dest, proposed, region, manifest, dry_run)
-    print(f"  - {_dry(dry_run)}CLAUDE.md ({_CLAUDE_MD_NOTE[kind]})")
+    _write_claude_md(dest, plan.text, region, manifest, dry_run)
+    print(f"  - {_dry(dry_run)}CLAUDE.md ({plan.note})")
+
+
+def _install_settings(project_dir: Path, dry_run: bool) -> None:
+    """Merge our hook entries into .claude/settings.json, or replace it.
+
+    The merge is the only write we make into a file the user owns, so the
+    previous version is kept either way — including when the file does not
+    parse, which usually means someone was editing it rather than that it is
+    worthless.
+    """
+    dest = project_dir / ".claude" / "settings.json"
+    src = TEMPLATES_DIR / "settings.json"
+    if not src.exists():
+        return
+    if not dest.exists():
+        if not dry_run:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)
+        print(f"  - {_dry(dry_run)}settings.json")
+        return
+    try:
+        before = read_verbatim(dest)
+        existing = json.loads(before)
+        migrated = merge_hooks(existing, json.loads(read_verbatim(src)).get("hooks", {}))
+    except Exception:
+        _replace_unparseable_settings(project_dir, dest, src, dry_run)
+        return
+    if not dry_run:
+        save_upgrade(project_dir, "settings.json.before-merge", before)
+        write_verbatim(dest, json.dumps(existing, indent=2) + "\n")
+    print(f"  - {_dry(dry_run)}settings.json (merged hooks)")
+    for old_cmd, _ in migrated:
+        print(f"    rewrote hook path: {old_cmd[:70]}")
+
+
+def _replace_unparseable_settings(project_dir: Path, dest: Path, src: Path,
+                                  dry_run: bool) -> None:
+    """Copy the bytes out, then install ours. A byte copy survives any encoding."""
+    kept = True
+    if not dry_run:
+        try:
+            backup = upgrades_path(project_dir, "settings.json.before-merge")
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(dest, backup)
+        except Exception:
+            kept = False
+        shutil.copy2(src, dest)
+    print(f"  - {_dry(dry_run)}settings.json (replaced — could not merge)")
+    if kept:
+        print(f"    {_dry(dry_run)}Yours saved to: "
+              ".claude/.upgrades/settings.json.before-merge")
+    else:
+        print("    WARNING: could not keep a copy of your settings.json")
 
 
 def copy_settings_and_claude_md(project_dir: Path, project_name: str,
@@ -1440,44 +1495,7 @@ def copy_settings_and_claude_md(project_dir: Path, project_name: str,
     """Copy settings.json (merge hooks) and refresh our block in CLAUDE.md."""
     print("\n[5/6] Copying settings and CLAUDE.md...")
 
-    # --- settings.json: merge hooks into existing ---
-    settings_dest = project_dir / ".claude" / "settings.json"
-    settings_src = TEMPLATES_DIR / "settings.json"
-    if settings_src.exists():
-        new_settings = json.loads(settings_src.read_text(encoding='utf-8'))
-        if settings_dest.exists():
-            try:
-                before = settings_dest.read_text(encoding='utf-8')
-                existing = json.loads(before)
-                migrated = merge_hooks(existing, new_settings.get("hooks", {}))
-                if not dry_run:
-                    # The only write we make into a file the user owns. Keep the
-                    # previous version reachable before touching it.
-                    save_upgrade(project_dir, "settings.json.before-merge", before)
-                    settings_dest.write_text(json.dumps(existing, indent=2) + "\n", encoding='utf-8')
-                print(f"  - {_dry(dry_run)}settings.json (merged hooks)")
-                for old_cmd, _ in migrated:
-                    print(f"    rewrote hook path: {old_cmd[:70]}")
-            except Exception:
-                if not dry_run:
-                    # Unparseable is not the same as worthless: someone was
-                    # probably editing it. Copy the bytes out before replacing.
-                    try:
-                        kept = (project_dir / ".claude" / ".upgrades"
-                                / "settings.json.before-merge")
-                        kept.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(settings_dest, kept)
-                    except Exception:
-                        pass
-                    shutil.copy2(settings_src, settings_dest)
-                print(f"  - {_dry(dry_run)}settings.json (replaced — could not merge)")
-                print(f"    {_dry(dry_run)}Yours saved to: "
-                      ".claude/.upgrades/settings.json.before-merge")
-        else:
-            if not dry_run:
-                settings_dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(settings_src, settings_dest)
-            print(f"  - {_dry(dry_run)}settings.json")
+    _install_settings(project_dir, dry_run)
 
     # --- settings.local.json: same stale-path rewrite, never templated ---
     for old_cmd, _ in (migrate_local_settings_hooks(project_dir) if not dry_run else []):
@@ -1583,8 +1601,8 @@ def bootstrap_project(
 
     # An upgrade must not silently switch a project's language back to English:
     # --lang is optional, and the manifest remembers what was installed.
-    installed_lang = load_manifest(project_dir).get("lang")
-    lang = lang or installed_lang or "en"
+    manifest = load_manifest(project_dir)
+    lang = lang or manifest.get("lang") or "en"
 
     # A project that already has our files gets the cleanup pass even without
     # --upgrade. Skipping it leaves a half-migrated mix: new hooks installed
@@ -1605,7 +1623,6 @@ def bootstrap_project(
         print(f"\nERROR: Templates not found: {TEMPLATES_DIR}")
         return 1
 
-    manifest = load_manifest(project_dir)
     all_skipped = []
 
     # Files the user edited are a question, not a silent skip. --force answers
@@ -1682,7 +1699,6 @@ Next steps:
 
 def run_batch_upgrade(
     parent_dir: Path, with_rules: bool, lang: str, force: bool, dry_run: bool,
-    keep_mine: bool = False,
 ) -> int:
     """Iterate direct subdirs of parent_dir that contain .beads/ and upgrade each."""
     if not parent_dir.exists() or not parent_dir.is_dir():
@@ -1692,16 +1708,11 @@ def run_batch_upgrade(
     # Nobody upgrading twenty projects reads twenty diffs. A batch upgrade
     # keeps every file the user edited and saves ours beside it — which is what
     # the README has always promised. Only --force overrides that.
-    if not force:
-        keep_mine = True
-
     print(f"\n[BATCH UPGRADE] Scanning {parent_dir}")
-    if force:
-        print("  Taking our version of every file;"
-              " yours go to .claude/.upgrades/")
-    else:
-        print("  Files you edited are kept; ours go to .claude/.upgrades/"
-              " (--force to take ours)")
+    print("  Taking our version of every file; yours go to .claude/.upgrades/"
+          if force else
+          "  Files you edited are kept; ours go to .claude/.upgrades/"
+          " (--force to take ours)")
     candidates = sorted(p for p in parent_dir.iterdir() if p.is_dir())
     upgraded = 0
     skipped: list = []
@@ -1715,7 +1726,7 @@ def run_batch_upgrade(
             rc = bootstrap_project(
                 project_dir=child, project_name=None, with_rules=with_rules,
                 lang=lang, force=force, upgrade=True, dry_run=dry_run,
-                keep_mine=keep_mine,
+                keep_mine=not force,
             )
             if rc == 0:
                 upgraded += 1
@@ -1751,7 +1762,7 @@ def main():
         parent = Path(args.all_parent).resolve()
         sys.exit(run_batch_upgrade(
             parent_dir=parent, with_rules=args.with_rules, lang=args.lang,
-            force=args.force, dry_run=args.dry_run, keep_mine=args.keep_mine,
+            force=args.force, dry_run=args.dry_run,
         ))
 
     project_dir = Path(args.project_dir).resolve()
