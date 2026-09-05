@@ -50,6 +50,8 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
 
 ### Unreleased
 
+### v3.8.0 (2026-09-05)
+
 - **Install as a plugin** — the repository is now also a Claude Code
   marketplace. The plugin carries the hooks, agents and skill and updates them
   itself; `/claude-protocol:init` lays down the half a plugin cannot carry
@@ -64,9 +66,24 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
   `bd init` fails.
 - **You are told when a newer claude-protocol is out** — once a week, at
   session start, from a process with a time limit, silent on any failure.
+- **`CLAUDE.md` arrives in your language** — `--lang ru` used to install
+  Russian rules and English orchestrator instructions, because no Russian
+  template existed. There is one now, with English as the fallback wherever a
+  translation is missing.
 - **Small findings get fixed, not filed** — `beads-workflow.md` used to make a
   bead of everything stumbled on; now the default is to fix it in the same
   branch, with a bead only for what will not fit inside the current work.
+- **The hooks stopped losing their arguments on Windows** — commands went
+  through `cmd.exe`, which split an argument on spaces, ate quotes and would
+  have run whatever followed a `&&`. For some people the hooks did not work at
+  all.
+- **`--force` no longer destroys a rule you edited** — the flag skipped the one
+  place that kept your version. What it overwrites now goes to
+  `.claude/.upgrades/<path>.mine` first.
+- **A path of the wrong kind stops one file, not the whole install** — a
+  directory where our file belongs, or a file where our directory belongs, used
+  to end the upgrade mid-way with a stack trace, leaving `settings.json`,
+  `CLAUDE.md` and the manifest unwritten.
 
 ### v3.7.0 (2026-09-03)
 
