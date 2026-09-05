@@ -49,6 +49,8 @@ Thumbs.db
 .dolt/
 *.db
 .beads-credential-key
+# redundant under .beads/ above, but bd doctor checks for it by name
+.beads/proxieddb/
 
 # Local install artifacts (this repo uses templates/ as source; .claude/ is a local install target)
 /.claude/.manifest.json
