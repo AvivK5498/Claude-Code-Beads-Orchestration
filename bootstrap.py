@@ -1747,7 +1747,8 @@ def _replace_unparseable_settings(project_dir: Path, dest: Path, src: Path,
 
 def copy_settings_and_claude_md(project_name: str,
                                 installer: Installer,
-                                with_settings: bool = True) -> None:
+                                with_settings: bool = True,
+                                lang: str = "en") -> None:
     """Copy settings.json (merge hooks) and refresh our block in CLAUDE.md.
 
     `with_settings` is off when the plugin supplies the hooks: writing our
@@ -1765,7 +1766,13 @@ def copy_settings_and_claude_md(project_name: str,
             print(f"  - settings.local.json: rewrote hook path: {old_cmd[:70]}")
 
     # --- CLAUDE.md: refresh our marked block, leave the rest of the file alone ---
-    claude_src = TEMPLATES_DIR / "CLAUDE.md"
+    # The rules ship in the chosen language and CLAUDE.md did not, so a project
+    # installed with --lang ru got Russian rules and English orchestrator
+    # instructions. Fall back to English when a translation is missing, the way
+    # the beads-workflow rule does.
+    claude_src = TEMPLATES_DIR / ("CLAUDE-ru.md" if lang == "ru" else "CLAUDE.md")
+    if not claude_src.exists():
+        claude_src = TEMPLATES_DIR / "CLAUDE.md"
     if claude_src.exists():
         template_text = read_verbatim(claude_src).replace("[Project]", project_name)
         update_claude_md(template_text, installer)
@@ -1940,7 +1947,7 @@ def bootstrap_project(
         copy_hooks(installer)
     copy_rules_and_skills(with_rules, lang, installer, with_skill=not project_only)
     copy_settings_and_claude_md(resolved_name, installer,
-                                with_settings=not project_only)
+                                with_settings=not project_only, lang=lang)
     setup_gitignore(installer)
 
     if project_only:
@@ -2064,7 +2071,7 @@ def main():
     parser.add_argument("--project-name", default=None, help="Project name (auto-inferred if not provided)")
     parser.add_argument("--project-dir", default=".", help="Project directory")
     parser.add_argument("--with-rules", action="store_true", help="Also copy dev rules (implementation-standard, logging, tdd)")
-    parser.add_argument("--lang", default=None, choices=["en", "ru"], help="Language for dev rules (default: the language this project was installed with, else en)")
+    parser.add_argument("--lang", default=None, choices=["en", "ru"], help="Language for the dev rules and CLAUDE.md (default: the language this project was installed with, else en)")
     parser.add_argument("--force", action="store_true", help="Take our version of every file, no questions asked")
     parser.add_argument("--keep-mine", dest="keep_mine", action="store_true", help="Keep your version of every file you edited, no questions asked")
     parser.add_argument("--upgrade", action="store_true", help="Run init flow then cleanup obsolete items (uses existing manifest)")

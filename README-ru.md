@@ -292,7 +292,7 @@ PATH этой оболочки — откройте новый терминал 
 | `--project-dir PATH` | Целевая директория (по умолчанию: текущая) |
 | `--project-name NAME` | Имя проекта для CLAUDE.md (автоопределяется из package.json / pyproject.toml / Cargo.toml / go.mod) |
 | `--no-rules` | Пропустить dev-правила (implementation, logging, TDD, resilience) |
-| `--lang en\|ru` | Язык dev-правил (по умолчанию: en) |
+| `--lang en\|ru` | Язык dev-правил и `CLAUDE.md` (по умолчанию: en) |
 | `--force` | Взять нашу версию каждого файла, без вопросов (твоя ложится в `.claude/.upgrades/`) |
 | `--keep-mine` | Оставить твою версию каждого правленого файла, без вопросов |
 | `--install-beads` | Поставить beads CLI без вопросов (по умолчанию спрашиваем, а когда ответить некому — не ставим ничего) |

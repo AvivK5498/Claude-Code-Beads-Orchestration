@@ -290,7 +290,7 @@ yourself are left alone.
 | `--project-dir PATH` | Target directory (default: current) |
 | `--project-name NAME` | Project name for CLAUDE.md (auto-inferred from package.json / pyproject.toml / Cargo.toml / go.mod) |
 | `--no-rules` | Skip dev rules (implementation, logging, TDD, resilience) |
-| `--lang en\|ru` | Language for dev rules (default: en) |
+| `--lang en\|ru` | Language for the dev rules and CLAUDE.md (default: en) |
 | `--force` | Take our version of every file, no questions asked (yours is kept in `.claude/.upgrades/`) |
 | `--keep-mine` | Keep your version of every file you edited, no questions asked |
 | `--install-beads` | Install the beads CLI without asking (default: ask, and install nothing when nobody can answer) |

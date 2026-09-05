@@ -24,8 +24,8 @@ Options:
   --project-name   Project name (auto-inferred if not provided)
   --project-dir    Project directory (default: current)
   --no-rules       Skip dev rules (implementation, logging, TDD)
-  --lang <en|ru>   Language for dev rules (default: whatever this project was
-                   installed with, else en)
+  --lang <en|ru>   Language for the dev rules and CLAUDE.md (default: whatever
+                   this project was installed with, else en)
   --force          Take our version of every file, no questions asked
   --keep-mine      Keep your version of every file you edited, no questions
   --dry-run        Print what would change and write nothing
