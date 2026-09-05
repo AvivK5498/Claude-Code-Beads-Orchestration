@@ -48,6 +48,65 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
 
 ## What Changed in v3
 
+### Unreleased
+
+- **Install as a plugin** — the repository is now also a Claude Code
+  marketplace. The plugin carries the hooks, agents and skill and updates them
+  itself; `/claude-protocol:init` lays down the half a plugin cannot carry
+  (beads, rules, `CLAUDE.md`) and unwires an earlier `npx` install so no hook
+  fires twice. `npx claude-protocol init` is unchanged.
+- **The enforcement hooks stand down in a project without `.beads/`** — they
+  had nothing to check there, and a plugin at user scope is loaded everywhere.
+- **`bd` is asked about, not installed behind your back** — the installer
+  prints the command for your machine and waits; `--install-beads` answers yes
+  in advance. It then checks the system can actually find `bd`, warns when it
+  is older than 1.1.0, and no longer hand-makes an empty `.beads/` when
+  `bd init` fails.
+- **You are told when a newer claude-protocol is out** — once a week, at
+  session start, from a process with a time limit, silent on any failure.
+- **Small findings get fixed, not filed** — `beads-workflow.md` used to make a
+  bead of everything stumbled on; now the default is to fix it in the same
+  branch, with a bead only for what will not fit inside the current work.
+
+### v3.7.0 (2026-09-03)
+
+- **The upgrade asks instead of leaving homework** — a file you edited that we
+  also changed becomes a question, one at a time, with a diff on request; `K`
+  and `T` answer for everything remaining. Whichever version loses is kept
+  under `.claude/.upgrades/`.
+- **Questions only where someone can answer** — stdin and stdout must both be a
+  terminal. Batch runs, CI and an agent driving the CLI keep the silent
+  behaviour rather than hanging on input that will never come. `--keep-mine`
+  is the counterpart to `--force`.
+- **`--dry-run` wrote files** — the flag reached only the cleanup pass, so the
+  preview the README tells you to run first modified the project it was
+  previewing.
+
+### v3.6.0 (2026-09-03)
+
+- **Hook commands stopped using relative paths** — a hook process inherits the
+  working directory of the last Bash call, so `node .claude/hooks/x.cjs` went
+  silently missing as soon as work moved into a subdirectory or a worktree.
+  Commands now resolve the project root inside Node, and an upgrade rewrites
+  stale ones instead of appending duplicates.
+- **Five hooks down to three** — `enforce-branch-before-edit` and
+  `nudge-claude-md-update` removed, and upgrades clean them out of existing
+  installs. `bash-guard` now checks every command in a chain: `cd sub && git
+  commit --no-verify` used to slip through.
+- **New rule `pre-code-workflow.md`** in both languages, plus
+  `repository-scope.md`. Raw `git worktree add` is blocked — it creates a
+  shadow `.beads/`.
+
+### v3.5.0 (2026-05-27)
+
+- **New rule `communication-style.md`** — plain language over jargon, in both
+  language sets.
+
+### v3.4.0 (2026-05-15)
+
+- **New rule `debugging-standard.md`** — the same error surviving a deliberate
+  fix is the trigger to stop repeating and change approach.
+
 ### v3.3.0 (2026-04-22)
 
 - **Upgrade mechanism** — new `npx claude-protocol upgrade` command with
@@ -95,7 +154,8 @@ Full details: [docs/decisions-en.md](docs/decisions-en.md)
   agents/
     code-reviewer.md        # Adversarial 3-phase review
     merge-supervisor.md     # Conflict resolution protocol
-  hooks/                    # 3 Node.js enforcement hooks + shared utils
+  hooks/                    # 3 Node.js enforcement hooks, shared utils,
+                            # and the update checker they spawn
   rules/
     beads-workflow.md       # Task lifecycle, bd command reference
     pre-code-workflow.md    # Three gates before any edit
@@ -131,16 +191,23 @@ Use `--force` to take our version of every file. Rules, agents, the skill and th
 
 ### What happens at session start
 
-Every time you start Claude Code, the `session-start` hook shows:
+The `session-start` hook says only what the task tracker cannot. `bd prime`
+already prints the beads — in progress, ready, blocked, stale — so repeating
+them here would cost a second listing and tell you nothing new.
 
-- **ACTION REQUIRED** — merged worktrees with unclosed beads, stale `inreview` tasks
-- **In Progress** — beads to resume
-- **Ready** — unblocked beads available for dispatch
-- **Blocked / Stale** — beads waiting on dependencies or inactive for 3+ days
-- **Recent Knowledge** — last 5 LEARNED entries from the knowledge base
-- **Open PRs** — your PRs awaiting review
+What it does report:
 
-No manual checking. Context is rebuilt automatically.
+- **ACTION REQUIRED** — a branch that was merged while its worktree and bead
+  are still open, with the command to close both
+- **WARNING** — uncommitted changes in the main checkout, because agents would
+  branch off them
+- **Open PRs** — yours, still awaiting review
+- **An outdated `bd`** — older than the version the rules rely on, with the
+  command to update it
+- **A newer claude-protocol** — checked at most once a week, in a process of
+  its own with a time limit, and silent on any failure
+
+Nothing to report means nothing printed.
 
 ### Project discovery
 
@@ -341,13 +408,22 @@ Subagents are blocked from finishing unless:
 |------|-------|-------------|
 | bash-guard | PreToolUse (Bash) | Blocks `--no-verify` and raw `git worktree add`. Requires description on `bd create`. Validates epic close (all children done, PR merged). Every command in a chain is checked, not just the first. |
 | validate-completion | SubagentStop | Checks worktree, push, status, checklist, comment, verbosity. |
-| session-start | SessionStart | Dirty main checkout, worktrees of merged branches, open PRs. Task listing is left to `bd prime`. |
+| session-start | SessionStart | Dirty main checkout, worktrees of merged branches, open PRs, a `bd` older than the rules need, a newer claude-protocol. Task listing is left to `bd prime`. |
+| update-check | — | Not a hook: the helper `session-start` spawns so the version check gets a time limit of its own. Answer cached for a week; silent on any failure. |
 | hook-utils | — | Shared utilities: project-dir resolution, command splitting, deny/ask/block, execCommand. |
 
-Hook commands resolve `.claude/hooks/` from `CLAUDE_PROJECT_DIR` rather than a relative
-path: a hook process inherits the working directory of the last Bash call, so a relative
-path stops resolving as soon as work moves into a subdirectory — and Claude Code reports
-that as non-blocking, leaving the hook silently absent.
+**In a project without `.beads/`, the enforcement hooks stand down.** They act
+on a bead lifecycle that is not there, and refusing `--no-verify` in a
+repository that never asked for any of this is not their call. It matters for a
+plugin installed at user scope, which is loaded for every project you open.
+
+Installed from npm, hook commands resolve `.claude/hooks/` from
+`CLAUDE_PROJECT_DIR` rather than a relative path: a hook process inherits the
+working directory of the last Bash call, so a relative path stops resolving as
+soon as work moves into a subdirectory — and Claude Code reports that as
+non-blocking, leaving the hook silently absent. Installed as a plugin, Claude
+Code resolves them itself from `hooks/hooks.json` through
+`CLAUDE_PLUGIN_ROOT`, and none of that wiring is written into your project.
 
 ## Dev Rules
 

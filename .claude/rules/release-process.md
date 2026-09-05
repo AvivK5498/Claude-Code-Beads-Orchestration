@@ -17,9 +17,13 @@
    the copy in their cache, so the release simply does not reach them.
    `TestPluginManifests::test_one_version_in_three_places` fails when they
    disagree — run the tests before tagging and it cannot be forgotten.
-2. Commit: `git commit -am "release: v3.x.x"`
-3. Tag: `git tag v3.x.x`
-4. Push: `git push && git push --tags`
+2. Move the **Unreleased** section of "What Changed in v3" to `### v3.x.x
+   (YYYY-MM-DD)` in `README.md` and `README-ru.md`, and start a fresh empty
+   Unreleased above it. Nothing else keeps that section current: it once stood
+   four releases behind and described a hook that had not existed for months.
+3. Commit: `git commit -am "release: v3.x.x"`
+4. Tag: `git tag v3.x.x`
+5. Push: `git push && git push --tags`
 
 The GitHub release the tag creates is also what the session-start update check
 reads, so a version that never becomes a release is a version nobody is told
