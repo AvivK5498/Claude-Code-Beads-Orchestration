@@ -50,6 +50,12 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
 
 ### Unreleased
 
+### v3.8.1 (2026-09-05)
+
+- **The release build runs on the Node 24 action runtime** — `checkout`,
+  `setup-node`, `setup-python` and `action-gh-release` were still declaring
+  Node 20, which GitHub has deprecated. Nothing in the package changed.
+
 ### v3.8.0 (2026-09-05)
 
 - **Install as a plugin** — the repository is now also a Claude Code
