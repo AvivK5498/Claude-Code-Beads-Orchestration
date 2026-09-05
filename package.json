@@ -17,6 +17,9 @@
     "worktree"
   ],
   "files": [
+    ".claude-plugin/",
+    "commands/",
+    "hooks/",
     "scripts/",
     "templates/",
     "bootstrap.py",

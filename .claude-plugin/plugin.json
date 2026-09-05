@@ -1,0 +1,19 @@
+{
+  "name": "claude-protocol",
+  "displayName": "Claude Protocol",
+  "version": "3.7.0",
+  "description": "Enforcement-first orchestration for Claude Code: beads task tracking, worktree isolation, cross-platform hooks and trigger-based rules.",
+  "author": {
+    "name": "weselow",
+    "url": "https://github.com/weselow"
+  },
+  "homepage": "https://github.com/weselow/claude-protocol",
+  "repository": "https://github.com/weselow/claude-protocol",
+  "agents": [
+    "./templates/agents/code-reviewer.md",
+    "./templates/agents/merge-supervisor.md"
+  ],
+  "commands": ["./commands/init.md"],
+  "skills": "./templates/skills",
+  "hooks": "./hooks/hooks.json"
+}

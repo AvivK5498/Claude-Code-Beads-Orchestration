@@ -5,7 +5,7 @@
 // Consolidated from: validate-epic-close + block-orchestrator-tools (Bash logic)
 
 const {
-  readStdinJSON, getField, deny, isSubagent,
+  readStdinJSON, getField, deny, isSubagent, hasBeads,
   execCommand, execCommandJSON, splitCommandSegments, runHook,
 } = require('./hook-utils.cjs');
 
@@ -14,6 +14,11 @@ runHook('bash-guard', () => {
 
   // Subagents get full access
   if (isSubagent(input)) process.exit(0);
+
+  // As a plugin this runs in every project it is enabled for. Refusing
+  // `git commit --no-verify` in a repository that never asked for any of this
+  // is not our call, and the bd checks below have nothing to check.
+  if (!hasBeads()) process.exit(0);
 
   // Get command — prefer env var (original behavior), fall back to stdin
   let toolInput;

@@ -1377,11 +1377,14 @@ class TestHookCommandShape:
                 assert chr(10) not in entry["hooks"][0]["command"]
 
     def test_canonical_map_covers_every_shipped_hook(self):
-        """Every hook file we install needs a command; hook-utils is a shared
-        library, not a hook."""
+        """Every hook file we install needs a command. Two files in there are
+        not hooks: hook-utils is the shared library, and update-check is the
+        helper session-start spawns so a network call can be given a hard time
+        limit of its own."""
+        helpers = {"hook-utils.cjs", "update-check.cjs"}
         shipped = {
             f.name for f in (TEMPLATES_DIR / "hooks").glob("*.cjs")
-            if f.name != "hook-utils.cjs"
+            if f.name not in helpers
         }
         assert shipped == set(canonical_hook_commands())
 
@@ -1785,7 +1788,7 @@ class TestLanguageIsRemembered:
     def _run(self, tmp_path, monkeypatch, argv):
         seen = {}
 
-        def record_lang(with_rules, lang, installer):
+        def record_lang(with_rules, lang, installer, **kwargs):
             seen.setdefault("lang", lang)
 
         _stub_heavy_steps(monkeypatch)
@@ -2108,7 +2111,7 @@ class TestPromptWiring:
         asked = []
         monkeypatch.setattr(bootstrap, "_stdin_is_a_person", lambda: isatty)
 
-        def record_prompt(with_rules, lang, installer):
+        def record_prompt(with_rules, lang, installer, **kwargs):
             asked.append(installer.prompt.will_ask)
 
         _stub_heavy_steps(monkeypatch)
@@ -3087,7 +3090,7 @@ class TestBatchUpgradeDoesNotAsk:
         monkeypatch.setattr(bootstrap, "_stdin_is_a_person", lambda: True)
         _stub_heavy_steps(monkeypatch)
 
-        def record(with_rules, lang, installer):
+        def record(with_rules, lang, installer, **kwargs):
             prompts.append(installer.prompt)
 
         monkeypatch.setattr(bootstrap, "copy_rules_and_skills", record)
@@ -3146,3 +3149,187 @@ class TestClaudeMdDryRunWritesNothing:
         after = _snapshot(tmp_path)
         assert after == before
         assert ("CLAUDE.md" in manifest.get("regions", {})) is (kind == "installed")
+
+
+# ============================================================================
+# Plugin manifests
+# ============================================================================
+# The repository is both a marketplace and the plugin it lists: .claude-plugin/
+# holds marketplace.json and plugin.json side by side, and the plugin manifest
+# points at directories that already exist (templates/agents, templates/hooks)
+# rather than a second copy of them. Two copies of a hook would drift.
+
+REPO_ROOT = bootstrap.SCRIPT_DIR
+PLUGIN_DIR = REPO_ROOT / ".claude-plugin"
+
+
+def _read_json(path):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+class TestPluginManifests:
+    def test_both_manifests_parse(self):
+        assert _read_json(PLUGIN_DIR / "marketplace.json")["name"] == "claude-protocol"
+        assert _read_json(PLUGIN_DIR / "plugin.json")["name"] == "claude-protocol"
+
+    def test_the_marketplace_lists_this_repository_as_the_plugin(self):
+        entries = _read_json(PLUGIN_DIR / "marketplace.json")["plugins"]
+
+        assert len(entries) == 1
+        assert entries[0]["source"] == "./"
+
+    def test_one_version_in_three_places(self):
+        """A marketplace entry whose version does not grow leaves every user on
+        the copy in their cache, so the three files have to move together."""
+        pkg = _read_json(REPO_ROOT / "package.json")["version"]
+        market = _read_json(PLUGIN_DIR / "marketplace.json")
+
+        assert _read_json(PLUGIN_DIR / "plugin.json")["version"] == pkg
+        assert market["metadata"]["version"] == pkg
+        assert market["plugins"][0]["version"] == pkg
+
+    @pytest.mark.parametrize("key", ["agents", "commands", "skills", "hooks"])
+    def test_every_declared_path_exists(self, key):
+        declared = _read_json(PLUGIN_DIR / "plugin.json")[key]
+        paths = declared if isinstance(declared, list) else [declared]
+
+        for path in paths:
+            assert (REPO_ROOT / path).exists(), \
+                f"plugin.json points {key} at {path}, which is not there"
+
+    def test_the_manifest_lists_every_agent_we_ship(self):
+        """`claude plugin validate` rejects a directory here, so agents are
+        listed one file at a time — and a new agent is then one edit away from
+        shipping through npx and not through the plugin."""
+        declared = {Path(p).name
+                    for p in _read_json(PLUGIN_DIR / "plugin.json")["agents"]}
+        on_disk = {p.name for p in (REPO_ROOT / "templates" / "agents").glob("*.md")}
+
+        assert declared == on_disk, "plugin.json and templates/agents disagree"
+
+    def test_hooks_json_runs_files_that_are_there(self):
+        hooks = _read_json(REPO_ROOT / "hooks" / "hooks.json")["hooks"]
+
+        assert set(hooks) == {"PreToolUse", "SubagentStop", "SessionStart"}
+        for groups in hooks.values():
+            for group in groups:
+                for hook in group["hooks"]:
+                    command = hook["command"]
+                    found = re.search(r"\$\{CLAUDE_PLUGIN_ROOT\}/([^\"]+)", command)
+                    assert found, f"hook command without a plugin root: {command}"
+                    assert (REPO_ROOT / found.group(1)).exists(), \
+                        f"hooks.json runs {found.group(1)}, which is not there"
+
+    def test_the_package_ships_what_the_plugin_needs(self):
+        """A plugin installed from npm is the published package: a directory
+        left out of `files` simply is not there."""
+        shipped = _read_json(REPO_ROOT / "package.json")["files"]
+
+        for needed in (".claude-plugin/", "hooks/", "templates/"):
+            assert needed in shipped, f"package.json does not ship {needed}"
+
+
+# ============================================================================
+# --project-only: the half a plugin cannot carry
+# ============================================================================
+# Installed as a plugin, Claude Code loads the hooks, agents and skill itself.
+# Hooks merge from every source, so a copy left in the project does not sit
+# quietly beside the plugin — every hook fires twice.
+
+
+class TestProjectOnlyInstall:
+    def _install(self, tmp_path, monkeypatch, **kwargs):
+        monkeypatch.setattr(bootstrap, "install_beads", lambda pd, *a, **kw: True)
+        monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda pd: None)
+        return bootstrap.bootstrap_project(
+            project_dir=tmp_path, project_name="Demo", with_rules=True,
+            lang="en", force=False, upgrade=False, dry_run=False, **kwargs,
+        )
+
+    def test_it_installs_only_what_the_plugin_cannot_carry(self, tmp_path, monkeypatch):
+        assert self._install(tmp_path, monkeypatch, project_only=True) == 0
+
+        claude = tmp_path / ".claude"
+        assert (claude / "rules" / "beads-workflow.md").exists()
+        assert (tmp_path / "CLAUDE.md").exists()
+        for carried_by_the_plugin in ("hooks", "agents", "skills", "settings.json"):
+            assert not (claude / carried_by_the_plugin).exists(), \
+                f"{carried_by_the_plugin} is the plugin's job now"
+
+    def test_a_plain_install_still_brings_everything(self, tmp_path, monkeypatch):
+        assert self._install(tmp_path, monkeypatch) == 0
+
+        claude = tmp_path / ".claude"
+        for rel in ("hooks", "agents", "skills", "settings.json", "rules"):
+            assert (claude / rel).exists(), f"a plain install lost {rel}"
+
+    def test_it_takes_over_from_an_earlier_npx_install(self, tmp_path, monkeypatch, capsys):
+        assert self._install(tmp_path, monkeypatch) == 0
+        assert list((tmp_path / ".claude" / "hooks").glob("*.cjs"))
+        capsys.readouterr()
+
+        assert self._install(tmp_path, monkeypatch, project_only=True) == 0
+
+        claude = tmp_path / ".claude"
+        assert not list((claude / "hooks").glob("*.cjs")), "hooks would fire twice"
+        assert not list((claude / "agents").glob("*.md"))
+        assert (claude / "rules" / "beads-workflow.md").exists(), "rules are ours to keep"
+        assert "Handed over to the plugin" in capsys.readouterr().out
+
+    def test_taking_over_unwires_the_hooks_from_settings(self, tmp_path, monkeypatch):
+        self._install(tmp_path, monkeypatch)
+        settings_path = tmp_path / ".claude" / "settings.json"
+        before = json.loads(settings_path.read_text(encoding="utf-8"))
+        assert _hook_commands(before), "the fixture has no hooks to unwire"
+
+        self._install(tmp_path, monkeypatch, project_only=True)
+
+        after = json.loads(settings_path.read_text(encoding="utf-8"))
+        assert _hook_commands(after) == []
+
+    def test_it_leaves_alone_a_file_it_did_not_install(self, tmp_path, monkeypatch):
+        """The manifest is the gate: a file with one of our names that we never
+        wrote belongs to whoever put it there."""
+        hooks = tmp_path / ".claude" / "hooks"
+        hooks.mkdir(parents=True)
+        theirs = hooks / "bash-guard.cjs"
+        theirs.write_text("// not ours\n", encoding="utf-8")
+
+        assert self._install(tmp_path, monkeypatch, project_only=True) == 0
+
+        assert theirs.read_text(encoding="utf-8") == "// not ours\n"
+
+
+def _hook_commands(settings: dict) -> list:
+    return [hook["command"]
+            for entries in (settings.get("hooks") or {}).values()
+            for entry in entries
+            for hook in entry.get("hooks", [])]
+
+
+class TestPluginProvidedPaths:
+    def test_it_is_derived_from_what_we_ship(self):
+        """Listed by hand, a new hook could be provided by the plugin and left
+        behind in projects at the same time."""
+        rels = set(bootstrap.plugin_provided_relpaths())
+
+        for hook in (bootstrap.TEMPLATES_DIR / "hooks").glob("*.cjs"):
+            assert f".claude/hooks/{hook.name}" in rels
+        for agent in (bootstrap.TEMPLATES_DIR / "agents").glob("*.md"):
+            assert f".claude/agents/{agent.name}" in rels
+        assert ".claude/skills/project-discovery/SKILL.md" in rels
+
+    def test_it_claims_nothing_that_lives_in_the_project(self):
+        rels = bootstrap.plugin_provided_relpaths()
+
+        assert not [r for r in rels if r.startswith(".claude/rules/")]
+        assert "CLAUDE.md" not in rels
+
+    def test_the_paths_are_the_ones_cleanup_can_find(self):
+        """_cleanup_file resolves against the project root and translates to
+        the manifest key itself. Handing it a manifest key instead removed
+        nothing and dropped the manifest entry on the way out."""
+        for rel in bootstrap.plugin_provided_relpaths():
+            assert rel.startswith(".claude/"), rel
+            assert (bootstrap.SCRIPT_DIR / "templates"
+                    / rel[len(".claude/"):]).exists() or "skills/" in rel

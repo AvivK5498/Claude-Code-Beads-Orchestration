@@ -14,13 +14,20 @@ const path = require('path');
 const {
   injectText, execCommand, getProjectDir, runHook,
   parseBdVersion, versionBelow, BD_MIN_VERSION,
+  hasBeads, isPluginInstall, readOwnVersion, updateNotice,
 } = require('./hook-utils.cjs');
 
 runHook('session-start', () => {
   const projectDir = getProjectDir();
 
-  if (!fs.existsSync(path.join(projectDir, '.beads'))) {
-    injectText("No .beads directory found. Run 'bd init' to initialize.\n");
+  if (!hasBeads()) {
+    // A copy installed under a project's .claude/hooks/ is there because
+    // someone put it there, so the missing directory is worth saying out loud.
+    // The plugin runs in every project it is enabled for, and telling each of
+    // them to run `bd init` every session is noise, not help.
+    if (!isPluginInstall()) {
+      injectText("No .beads directory found. Run 'bd init' to initialize.\n");
+    }
     process.exit(0);
   }
 
@@ -28,6 +35,7 @@ runHook('session-start', () => {
   const repoRoot = execCommand('git', ['-C', projectDir, 'rev-parse', '--show-toplevel']);
 
   collectOutdatedBd(output);
+  collectUpdateNotice(output);
   collectDirtyWarning(repoRoot, output);
   collectMergedWorktrees(projectDir, repoRoot, output);
   collectOpenPrs(output);
@@ -54,6 +62,28 @@ function collectOutdatedBd(output) {
   output.push('   (bd memories, bd remember, bd worktree, bd prime).');
   output.push('   Update it: npm install -g @beads/bd@latest');
   output.push('');
+}
+
+/**
+ * A newer claude-protocol than the one running here.
+ *
+ * The check lives in its own process with a hard time limit, and its answer is
+ * cached for a week — a session start is not the place to wait on the network.
+ * Nothing to say when the version cannot be read, when the check fails, or
+ * when there is no network: an update people do not hear about costs less than
+ * a slow start every time.
+ */
+function collectUpdateNotice(output) {
+  const current = readOwnVersion();
+  if (!current) return;
+
+  const script = path.join(__dirname, 'update-check.cjs');
+  if (!fs.existsSync(script)) return;
+
+  const latest = execCommand(process.execPath, [script],
+                             { shell: false, timeout: 6000 });
+  const lines = updateNotice(current, latest, isPluginInstall());
+  if (lines) output.push(...lines);
 }
 
 /** Uncommitted work in the main checkout means agents would branch off it. */

@@ -270,6 +270,48 @@ function versionBelow(current, minimum) {
 }
 
 // ---------------------------------------------------------------------------
+// Our own version
+// ---------------------------------------------------------------------------
+
+/**
+ * The version of claude-protocol this project is running, or null.
+ *
+ * Two installs, two places to look. As a plugin the version is the plugin's
+ * own manifest. Installed with npx, bootstrap records it in the project's
+ * .claude/.manifest.json, which is the only record of it there.
+ */
+function readOwnVersion() {
+  const file = isPluginInstall()
+    ? path.join(process.env.CLAUDE_PLUGIN_ROOT, '.claude-plugin', 'plugin.json')
+    : path.join(getProjectDir(), '.claude', '.manifest.json');
+  try {
+    const version = JSON.parse(fs.readFileSync(file, 'utf8')).version;
+    return typeof version === 'string' ? version : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The lines to print when a newer version is out, or null when it is not.
+ *
+ * The two installs are updated differently, and the plugin path needs the part
+ * people do not expect: auto-update is off by default for a third-party
+ * marketplace, so nothing arrives until someone turns it on.
+ */
+function updateNotice(current, latest, fromPlugin) {
+  if (!versionBelow(current, latest)) return null;
+  return [
+    `claude-protocol ${current} is behind ${latest}.`,
+    fromPlugin
+      ? '   Update it in /plugin → Marketplaces → claude-protocol. Auto-update is'
+        + ' off by default for third-party marketplaces — turn it on there too.'
+      : '   Update it with: npx claude-protocol@latest upgrade',
+    '',
+  ];
+}
+
+// ---------------------------------------------------------------------------
 // Git helpers
 // ---------------------------------------------------------------------------
 
@@ -299,9 +341,33 @@ function getCurrentBranch() {
 function getProjectDir() {
   const fromEnv = process.env.CLAUDE_PROJECT_DIR;
   if (fromEnv) return fromEnv;
-  const fromHere = path.resolve(__dirname, '..', '..');
-  if (fs.existsSync(path.join(fromHere, '.claude'))) return fromHere;
+  // Walking up from __dirname is only meaningful for the copy installed under
+  // a project's .claude/hooks/. Started from the plugin, this file lives in the
+  // plugin's own checkout — which has a .claude/ and a .beads/ of its own, so
+  // the guess would answer with the plugin instead of the project being worked
+  // on, and every check built on the answer would be about the wrong place.
+  if (!isPluginInstall()) {
+    const fromHere = path.resolve(__dirname, '..', '..');
+    if (fs.existsSync(path.join(fromHere, '.claude'))) return fromHere;
+  }
   return process.cwd();
+}
+
+/** True when this hook was started by the plugin, not by a copy in a project. */
+function isPluginInstall() {
+  return Boolean(process.env.CLAUDE_PLUGIN_ROOT);
+}
+
+/**
+ * True when the project being worked on tracks its work in beads.
+ *
+ * The plugin's hooks run in every project it is enabled for. Everything these
+ * hooks enforce — bead lifecycle, worktree isolation, the completion report —
+ * is meaningless where there is no .beads/, and refusing `git commit
+ * --no-verify` in someone's unrelated repository is not our call to make.
+ */
+function hasBeads() {
+  return fs.existsSync(path.join(getProjectDir(), '.beads'));
 }
 
 // ---------------------------------------------------------------------------
@@ -491,6 +557,10 @@ module.exports = {
   getRepoRoot,
   getCurrentBranch,
   getProjectDir,
+  isPluginInstall,
+  hasBeads,
+  readOwnVersion,
+  updateNotice,
   parseBeadId,
   parseEpicId,
   containsPathSegment,

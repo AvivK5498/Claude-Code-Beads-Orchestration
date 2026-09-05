@@ -418,3 +418,155 @@ describe('BD_MIN_VERSION', () => {
     expect(BD_MIN_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Where a hook thinks it is, and whether beads lives there
+// ---------------------------------------------------------------------------
+// Started from the plugin, these files sit in the plugin's own checkout, which
+// has a .claude/ and a .beads/ of its own. Walking up from __dirname would then
+// answer with the plugin instead of the project being worked on, and every
+// check built on the answer would be about the wrong place.
+
+const { hasBeads, isPluginInstall } = require(utilsPath);
+
+function withPluginRoot(value, run) {
+  const saved = process.env.CLAUDE_PLUGIN_ROOT;
+  if (value === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+  else process.env.CLAUDE_PLUGIN_ROOT = value;
+  try {
+    return run();
+  } finally {
+    if (saved === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+    else process.env.CLAUDE_PLUGIN_ROOT = saved;
+  }
+}
+
+function askInSubprocess(expression, cwd, env) {
+  const script = `const u=require(${JSON.stringify(utilsPath)});`
+    + `process.stdout.write(String(${expression}));`;
+  return spawnSync(process.execPath, ['-e', script], {
+    cwd,
+    encoding: 'utf8',
+    env: { ...process.env, CLAUDE_PROJECT_DIR: '', CLAUDE_PLUGIN_ROOT: '', ...env },
+  }).stdout;
+}
+
+describe('isPluginInstall', () => {
+  it('is true only when a plugin root is in the environment', () => {
+    expect(withPluginRoot('/x/plugins/claude-protocol',
+                          () => isPluginInstall())).toBe(true);
+    expect(withPluginRoot(undefined, () => isPluginInstall())).toBe(false);
+  });
+});
+
+describe('hasBeads', () => {
+  it('is true where the project tracks work in beads', () => {
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), 'hu-beads-'));
+    fs.mkdirSync(path.join(project, '.beads'));
+
+    expect(withEnv(project, () => hasBeads())).toBe(true);
+  });
+
+  it('is false where it does not', () => {
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), 'hu-plain-'));
+
+    expect(withEnv(project, () => hasBeads())).toBe(false);
+  });
+});
+
+describe('getProjectDir under a plugin', () => {
+  it('answers with CLAUDE_PROJECT_DIR whenever it is set', () => {
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), 'hu-env-'));
+
+    expect(askInSubprocess('u.getProjectDir()', os.tmpdir(),
+                           { CLAUDE_PROJECT_DIR: project })).toBe(project);
+  });
+
+  it('walks up from the hook file for a copy installed in a project', () => {
+    expect(askInSubprocess('u.getProjectDir()', os.tmpdir(), {})).toBe(repoRoot);
+  });
+
+  it('does not walk up to the plugin when it was started from one', () => {
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'hu-cwd-'));
+
+    const answer = askInSubprocess('u.getProjectDir()', elsewhere,
+                                   { CLAUDE_PLUGIN_ROOT: '/x/plugins/claude-protocol' });
+
+    expect(answer).not.toBe(repoRoot);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Which version is running, and what to say when a newer one is out
+// ---------------------------------------------------------------------------
+
+const { readOwnVersion, updateNotice } = require(utilsPath);
+
+describe('readOwnVersion', () => {
+  it('reads the plugin manifest when it runs as a plugin', () => {
+    const pluginRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hu-plugin-'));
+    fs.mkdirSync(path.join(pluginRoot, '.claude-plugin'));
+    fs.writeFileSync(path.join(pluginRoot, '.claude-plugin', 'plugin.json'),
+                     JSON.stringify({ name: 'claude-protocol', version: '3.9.1' }));
+
+    expect(withPluginRoot(pluginRoot, () => readOwnVersion())).toBe('3.9.1');
+  });
+
+  it('reads the project manifest for an install from npx', () => {
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), 'hu-npx-'));
+    fs.mkdirSync(path.join(project, '.claude'));
+    fs.writeFileSync(path.join(project, '.claude', '.manifest.json'),
+                     JSON.stringify({ version: '3.4.0', files: {} }));
+
+    expect(withPluginRoot(undefined,
+      () => withEnv(project, () => readOwnVersion()))).toBe('3.4.0');
+  });
+
+  it('is null when there is nothing to read', () => {
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'hu-none-'));
+
+    expect(withPluginRoot(undefined,
+      () => withEnv(empty, () => readOwnVersion()))).toBeNull();
+  });
+
+  it('is null when the manifest has no version', () => {
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), 'hu-noversion-'));
+    fs.mkdirSync(path.join(project, '.claude'));
+    fs.writeFileSync(path.join(project, '.claude', '.manifest.json'),
+                     JSON.stringify({ files: {} }));
+
+    expect(withPluginRoot(undefined,
+      () => withEnv(project, () => readOwnVersion()))).toBeNull();
+  });
+});
+
+describe('updateNotice', () => {
+  it('says nothing when the running version is current', () => {
+    expect(updateNotice('3.7.0', '3.7.0', false)).toBeNull();
+    expect(updateNotice('3.8.0', '3.7.0', false)).toBeNull();
+  });
+
+  it('says nothing when the latest version could not be read', () => {
+    expect(updateNotice('3.7.0', null, false)).toBeNull();
+    expect(updateNotice('3.7.0', '', true)).toBeNull();
+  });
+
+  it('names both versions when one is behind', () => {
+    const lines = updateNotice('3.6.0', '3.7.0', false).join('\n');
+
+    expect(lines).toContain('3.6.0');
+    expect(lines).toContain('3.7.0');
+  });
+
+  it('tells an npx install to run the upgrade', () => {
+    expect(updateNotice('3.6.0', '3.7.0', false).join('\n'))
+      .toContain('npx claude-protocol@latest upgrade');
+  });
+
+  it('warns a plugin install that auto-update is off by default', () => {
+    const lines = updateNotice('3.6.0', '3.7.0', true).join('\n');
+
+    expect(lines).toContain('/plugin');
+    expect(lines).toContain('off by default');
+  });
+});
