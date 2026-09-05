@@ -3333,3 +3333,68 @@ class TestPluginProvidedPaths:
             assert rel.startswith(".claude/"), rel
             assert (bootstrap.SCRIPT_DIR / "templates"
                     / rel[len(".claude/"):]).exists() or "skills/" in rel
+
+
+# ============================================================================
+# CLAUDE.md ships in both languages
+# ============================================================================
+# The rules already did; CLAUDE.md did not. A project installed with --lang ru
+# got Russian rules sitting next to English orchestrator instructions.
+
+CLAUDE_EN = TEMPLATES_DIR / "CLAUDE.md"
+CLAUDE_RU = TEMPLATES_DIR / "CLAUDE-ru.md"
+
+
+class TestClaudeMdTemplates:
+    def test_both_templates_ship(self):
+        assert CLAUDE_EN.exists()
+        assert CLAUDE_RU.exists()
+
+    def test_the_english_one_is_in_english(self):
+        assert not _cyrillic(CLAUDE_EN.read_text(encoding="utf-8"))
+
+    def test_the_russian_one_is_translated(self):
+        assert _cyrillic(CLAUDE_RU.read_text(encoding="utf-8"))
+
+    @pytest.mark.parametrize("path", [CLAUDE_EN, CLAUDE_RU], ids=["en", "ru"])
+    def test_both_keep_the_managed_block_markers(self, path):
+        """Without the markers an upgrade cannot tell our block from the text
+        around it, and hands the whole template over instead of refreshing."""
+        assert bootstrap.marked_span(path.read_text(encoding="utf-8")) is not None
+
+    @pytest.mark.parametrize("path", [CLAUDE_EN, CLAUDE_RU], ids=["en", "ru"])
+    def test_both_keep_the_project_placeholder(self, path):
+        assert "[Project]" in path.read_text(encoding="utf-8")
+
+
+class TestClaudeMdFollowsTheLanguage:
+    def _install(self, tmp_path, monkeypatch, lang):
+        monkeypatch.setattr(bootstrap, "install_beads", lambda pd, *a, **kw: True)
+        monkeypatch.setattr(bootstrap, "run_bd_doctor", lambda pd: None)
+        bootstrap.bootstrap_project(
+            project_dir=tmp_path, project_name="Demo", with_rules=True,
+            lang=lang, force=False, upgrade=False, dry_run=False,
+        )
+        return (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
+
+    def test_ru_installs_the_russian_one(self, tmp_path, monkeypatch):
+        assert _cyrillic(self._install(tmp_path, monkeypatch, "ru"))
+
+    def test_en_installs_the_english_one(self, tmp_path, monkeypatch):
+        assert not _cyrillic(self._install(tmp_path, monkeypatch, "en"))
+
+    def test_the_project_name_still_lands_in_it(self, tmp_path, monkeypatch):
+        text = self._install(tmp_path, monkeypatch, "ru")
+
+        assert "Demo" in text
+        assert "[Project]" not in text
+
+    def test_the_language_is_remembered_for_the_next_upgrade(self, tmp_path, monkeypatch):
+        """--lang is optional on an upgrade, and the manifest is what keeps a
+        project from silently switching back to English."""
+        self._install(tmp_path, monkeypatch, "ru")
+
+        manifest = json.loads(
+            (tmp_path / ".claude" / ".manifest.json").read_text(encoding="utf-8"))
+
+        assert manifest["lang"] == "ru"
