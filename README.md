@@ -58,6 +58,8 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
 
 ### Unreleased
 
+### v3.9.1 (2026-09-07)
+
 - **An entry already anchored with a slash is not added again** — `.gitignore`
   entries were compared as written, so a project spelling them `/.worktrees/`
   and `/.claude/.upgrades/` got a second, unanchored copy of each appended on
