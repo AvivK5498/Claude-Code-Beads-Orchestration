@@ -17,7 +17,10 @@ const path = require('path');
 
 const RELEASES_URL =
   'https://api.github.com/repos/weselow/claude-protocol/releases/latest';
-const CACHE_DAYS = 7;
+// One request a day per machine. A week was long enough to hide a release
+// entirely: 3.9.0 and 3.9.1 both went out on one afternoon, and every cache
+// written that morning went on answering with the version before them.
+const CACHE_DAYS = 1;
 const REQUEST_TIMEOUT_MS = 3000;
 
 /** Where the answer is remembered. CLAUDE_PLUGIN_DATA survives plugin updates. */

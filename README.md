@@ -58,6 +58,13 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
 
 ### Unreleased
 
+- **A new version is announced within a day, not a week** — the update check
+  caches its answer so a session start never waits on the network, and the
+  window was a week. Two releases went out on one afternoon and every cache
+  written that morning kept answering with the version before them. One
+  request a day per machine costs nothing and the news arrives while it is
+  news.
+
 ### v3.9.1 (2026-09-07)
 
 - **An entry already anchored with a slash is not added again** — `.gitignore`
@@ -263,7 +270,7 @@ What it does report:
 - **Open PRs** — yours, still awaiting review
 - **An outdated `bd`** — older than the version the rules rely on, with the
   command to update it
-- **A newer claude-protocol** — checked at most once a week, in a process of
+- **A newer claude-protocol** — checked at most once a day, in a process of
   its own with a time limit, and silent on any failure
 
 Nothing to report means nothing printed.
@@ -332,8 +339,8 @@ your unrelated repositories.
 **Auto-update is off by default** for a third-party marketplace — the plugin
 stays at the version you installed until you turn it on in `/plugin` →
 **Marketplaces** → **claude-protocol** → **Enable auto-update**. Whether it is
-on or off, the session-start hook tells you once a week when a newer version is
-out.
+on or off, the session-start hook tells you within a day of a newer version
+being out.
 
 **Already installed with `npx`?** Nothing runs twice. Hooks merge from every
 source, so the copies in `.claude/hooks/` would fire alongside the plugin's —
@@ -472,7 +479,7 @@ Subagents are blocked from finishing unless:
 | bash-guard | PreToolUse (Bash) | Blocks `--no-verify` and raw `git worktree add`. Requires description on `bd create`. Validates epic close (all children done, PR merged). Every command in a chain is checked, not just the first. |
 | validate-completion | SubagentStop | Checks worktree, push, status, checklist, comment, verbosity. |
 | session-start | SessionStart | Dirty main checkout, worktrees of merged branches, open PRs, a `bd` older than the rules need, a newer claude-protocol. Task listing is left to `bd prime`. |
-| update-check | — | Not a hook: the helper `session-start` spawns so the version check gets a time limit of its own. Answer cached for a week; silent on any failure. |
+| update-check | — | Not a hook: the helper `session-start` spawns so the version check gets a time limit of its own. Answer cached for a day; silent on any failure. |
 | hook-utils | — | Shared utilities: project-dir resolution, command splitting, deny/ask/block, execCommand. |
 
 **In a project without `.beads/`, the enforcement hooks stand down.** They act
