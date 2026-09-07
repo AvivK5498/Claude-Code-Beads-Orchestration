@@ -3625,3 +3625,50 @@ class TestPathsSpelledDifferently:
             {"scope": "project", "projectPath": str(real)}))
 
         assert plugin_active_for(link) is True
+
+
+class TestBothSidesReadTheRegistryTheSameWay:
+    """The rule lives twice — plugin_active_for here, pluginActiveHere in
+    templates/hooks/hook-utils.cjs — because one runs in the installer and the
+    other inside a hook. Two copies of a rule in two languages drift silently,
+    the way BD_MIN_VERSION would without the test that pins it, so both are
+    asked the same questions and have to give the same answers."""
+
+    @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+    def test_node_and_python_agree(self, tmp_path, monkeypatch):
+        utils = Path(__file__).parent.parent / "templates" / "hooks" / "hook-utils.cjs"
+        project = tmp_path / "project"
+        project.mkdir()
+        other = tmp_path / "other"
+        other.mkdir()
+
+        cases = [
+            ("user-scope", _registry_with({"scope": "user"}), True),
+            ("this-project", _registry_with(
+                {"scope": "project", "projectPath": str(project)}), True),
+            ("another-project", _registry_with(
+                {"scope": "project", "projectPath": str(other)}), False),
+            ("relative-path", _registry_with(
+                {"scope": "project", "projectPath": "./project"}), False),
+            ("someone-else", {"version": 2, "plugins": {
+                "other@x": [{"scope": "user"}]}}, False),
+            ("broken-json", "not json {{{", False),
+            ("unknown-shape", {"plugins": "nope"}, False),
+        ]
+
+        script = ("const u=require(process.argv[1]);"
+                  "process.stdout.write(String(u.pluginActiveHere(process.argv[2])));")
+        for name, registry, expected in cases:
+            config = tmp_path / f"config-{name}"
+            _write_registry(config, registry)
+            monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+
+            node_says = subprocess.run(
+                ["node", "-e", script, str(utils), str(project)],
+                capture_output=True, text=True, check=True,
+                env={**os.environ, "CLAUDE_CONFIG_DIR": str(config),
+                     "CLAUDE_PLUGIN_ROOT": ""},
+            ).stdout
+
+            assert plugin_active_for(project) is expected, f"python, {name}"
+            assert node_says == str(expected).lower(), f"node, {name}"
