@@ -367,12 +367,24 @@ function pluginRegistryPath() {
 
 /** The same directory, however either side happened to spell it. */
 function samePath(a, b) {
-  if (!a || !b) return false;
   const tidy = (p) => {
-    const resolved = path.resolve(String(p).replace(/[\\/]+$/, ''));
+    if (!p) return null;
+    const trimmed = String(p).replace(/[\\/]+$/, '');
+    // A relative path has no meaning here. Resolving it would use this
+    // process's working directory, which for a hook is wherever the last Bash
+    // call happened to leave it — an answer invented out of nothing.
+    if (!path.isAbsolute(trimmed)) return null;
+    let resolved = path.resolve(trimmed);
+    try {
+      // Follows symlinks and expands Windows short names, so /tmp and
+      // /private/tmp are one directory. Only possible for a path that exists;
+      // for one that does not, the text is the best there is.
+      resolved = fs.realpathSync.native(resolved);
+    } catch { /* not on disk — compare what was written */ }
     return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
   };
-  return tidy(a) === tidy(b);
+  const left = tidy(a);
+  return left !== null && left === tidy(b);
 }
 
 /**
@@ -420,7 +432,15 @@ function pluginSwitchedOff(projectDir) {
  */
 function pluginActiveHere(projectDir) {
   const here = projectDir || getProjectDir();
-  if (pluginSwitchedOff(here)) return false;
+  // The registry first, and the settings only if it says yes: this runs before
+  // every hook, and on the overwhelmingly common machine with no such plugin
+  // installed that is one missing file instead of four.
+  if (!registrySaysActive(here)) return false;
+  return !pluginSwitchedOff(here);
+}
+
+/** The registry half of pluginActiveHere: installed, and covering this project. */
+function registrySaysActive(projectDir) {
   try {
     const registry = JSON.parse(fs.readFileSync(pluginRegistryPath(), 'utf8'));
     const plugins = registry && registry.plugins;
@@ -431,7 +451,8 @@ function pluginActiveHere(projectDir) {
       for (const entry of entries) {
         if (!entry || typeof entry !== 'object') continue;
         if (entry.scope === 'user') return true;
-        if (entry.scope === 'project' && samePath(entry.projectPath, here)) return true;
+        if (entry.scope === 'project'
+            && samePath(entry.projectPath, projectDir)) return true;
       }
     }
   } catch {

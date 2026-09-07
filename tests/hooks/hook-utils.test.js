@@ -799,3 +799,27 @@ describe('pluginActiveHere with the plugin switched off', () => {
       .toBe(true);
   });
 });
+
+// Two ways a recorded path can name the right directory in the wrong words,
+// and one way it can name nothing at all.
+describe('pluginActiveHere on a path spelled differently', () => {
+  it('is false for a relative path, which resolves against nothing knowable', () => {
+    const registry = registryWith({ scope: 'project', projectPath: './somewhere' });
+
+    expect(withRegistry(registry, () => pluginActiveHere(path.resolve('./somewhere'))))
+      .toBe(false);
+  });
+
+  it('sees through a symlink to the same directory', () => {
+    const real = fs.mkdtempSync(path.join(os.tmpdir(), 'hu-real-'));
+    const link = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'hu-link-')), 'as-seen');
+    try {
+      fs.symlinkSync(real, link, 'junction');
+    } catch {
+      return; // Windows without the privilege to make one. Nothing to prove here.
+    }
+    const registry = registryWith({ scope: 'project', projectPath: real });
+
+    expect(withRegistry(registry, () => pluginActiveHere(link))).toBe(true);
+  });
+});
