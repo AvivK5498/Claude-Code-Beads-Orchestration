@@ -14,6 +14,14 @@
 npx claude-protocol init --lang ru
 ```
 
+или с маркетплейса - выполните в Claude Code:
+
+```
+/plugin marketplace add weselow/claude-protocol
+/plugin install claude-protocol@claude-protocol
+/claude-protocol:init
+```
+
 <br>
 
 ![The Claude Protocol](screenshots/kanbanui.png)
