@@ -58,6 +58,15 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
 
 ### Unreleased
 
+### v3.8.2 (2026-09-07)
+
+- **The plugin loads without a duplicate-hooks error** — `plugin.json` named
+  `hooks/hooks.json`, the one file Claude Code loads by itself, so every
+  startup reported `Duplicate hooks file detected`. The manifest field is for
+  hook files *besides* the standard one. The line is gone and a test keeps it
+  from coming back; the hooks themselves were never affected, because the
+  automatic load is the one that won.
+
 ### v3.8.1 (2026-09-05)
 
 - **The release build runs on the Node 24 action runtime** — `checkout`,

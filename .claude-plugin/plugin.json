@@ -1,7 +1,7 @@
 {
   "name": "claude-protocol",
   "displayName": "Claude Protocol",
-  "version": "3.8.1",
+  "version": "3.8.2",
   "description": "Enforcement-first orchestration for Claude Code: beads task tracking, worktree isolation, cross-platform hooks and trigger-based rules.",
   "author": {
     "name": "weselow",
@@ -14,6 +14,5 @@
     "./templates/agents/merge-supervisor.md"
   ],
   "commands": ["./commands/init.md"],
-  "skills": "./templates/skills",
-  "hooks": "./hooks/hooks.json"
+  "skills": "./templates/skills"
 }

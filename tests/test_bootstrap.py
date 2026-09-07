@@ -3188,7 +3188,7 @@ class TestPluginManifests:
         assert market["metadata"]["version"] == pkg
         assert market["plugins"][0]["version"] == pkg
 
-    @pytest.mark.parametrize("key", ["agents", "commands", "skills", "hooks"])
+    @pytest.mark.parametrize("key", ["agents", "commands", "skills"])
     def test_every_declared_path_exists(self, key):
         declared = _read_json(PLUGIN_DIR / "plugin.json")[key]
         paths = declared if isinstance(declared, list) else [declared]
@@ -3196,6 +3196,21 @@ class TestPluginManifests:
         for path in paths:
             assert (REPO_ROOT / path).exists(), \
                 f"plugin.json points {key} at {path}, which is not there"
+
+    def test_the_manifest_leaves_the_standard_hooks_file_alone(self):
+        """Claude Code loads hooks/hooks.json at the plugin root by itself, and
+        the manifest field is for hook files BESIDES that one. Naming it there
+        made every plugin load report 'Duplicate hooks file detected' — the
+        automatic load won, the manifest one failed, and the noise reached
+        everyone who installed the plugin."""
+        declared = _read_json(PLUGIN_DIR / "plugin.json").get("hooks")
+        paths = [] if declared is None else (
+            declared if isinstance(declared, list) else [declared])
+
+        standard = (REPO_ROOT / "hooks" / "hooks.json").resolve()
+        for path in paths:
+            assert (REPO_ROOT / path).resolve() != standard, \
+                "plugin.json declares the hooks file Claude Code already loads"
 
     def test_the_manifest_lists_every_agent_we_ship(self):
         """`claude plugin validate` rejects a directory here, so agents are

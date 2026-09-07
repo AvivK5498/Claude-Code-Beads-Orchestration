@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "Enforcement-first orchestration for Claude Code: beads task tracking, worktree isolation, cross-platform hooks and trigger-based rules.",
-    "version": "3.8.1"
+    "version": "3.8.2"
   },
   "plugins": [
     {
       "name": "claude-protocol",
       "source": "./",
       "description": "Hooks, agents and the project-discovery skill. Rules and CLAUDE.md are laid into the project by /claude-protocol:init.",
-      "version": "3.8.1",
+      "version": "3.8.2",
       "author": {
         "name": "weselow",
         "url": "https://github.com/weselow"
