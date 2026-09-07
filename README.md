@@ -58,6 +58,12 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
 
 ### Unreleased
 
+- **An entry already anchored with a slash is not added again** — `.gitignore`
+  entries were compared as written, so a project spelling them `/.worktrees/`
+  and `/.claude/.upgrades/` got a second, unanchored copy of each appended on
+  every install. git reads both spellings as the same path at the repository
+  root.
+
 ### v3.9.0 (2026-09-07)
 
 - **One source supplies the hooks, whichever order you install in** — the

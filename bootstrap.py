@@ -1875,6 +1875,22 @@ def copy_settings_and_claude_md(project_name: str,
     print("  DONE")
 
 
+def _gitignore_key(line: str) -> str:
+    """One .gitignore line reduced to what two spellings of it have in common.
+
+    git reads `/.worktrees/`, `.worktrees/` and `.worktrees` as covering the
+    same path at the repository root — and an unanchored entry covers the root
+    as well — so all three mean the path is already ignored. Comparing the
+    written form instead appended a second copy of every entry a project had
+    anchored with a leading slash.
+
+    A comment keeps its `#`, so `# .worktrees/ on purpose` never reads as the
+    entry itself; that would leave the path unignored on the strength of a
+    sentence about it.
+    """
+    return line.strip().lstrip("/").rstrip("/")
+
+
 def setup_gitignore(installer: Installer) -> None:
     """Ensure .worktrees/, .claude/.upgrades/, and /issues.jsonl are in .gitignore.
 
@@ -1897,10 +1913,8 @@ def setup_gitignore(installer: Installer) -> None:
     if gitignore_path.exists():
         content = gitignore_path.read_text(encoding='utf-8')
         lines = content.splitlines()
-        missing = [
-            e for e in entries
-            if e not in lines and e.rstrip("/") not in lines
-        ]
+        present = {_gitignore_key(line) for line in lines}
+        missing = [e for e in entries if _gitignore_key(e) not in present]
         if missing:
             if dry_run:
                 for entry in missing:
