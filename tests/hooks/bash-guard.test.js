@@ -241,3 +241,53 @@ describe('a project without .beads', () => {
     expect(result.stdout).toContain('deny');
   });
 });
+
+// One end-to-end check that the stand-down really reaches a shipped hook: the
+// mechanism itself lives in runHook and is covered in hook-utils.test.js, but
+// only this proves bash-guard goes through it.
+describe('bash-guard under an active plugin', () => {
+  function configDirNaming(project) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bg-registry-'));
+    fs.mkdirSync(path.join(dir, 'plugins'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'plugins', 'installed_plugins.json'),
+      JSON.stringify({
+        version: 2,
+        plugins: {
+          'claude-protocol@claude-protocol': [
+            { scope: 'project', projectPath: project },
+          ],
+        },
+      }),
+    );
+    return dir;
+  }
+
+  const denied = makeInput('git commit --no-verify -m "skip hooks"');
+
+  it('lets the plugin copy do the denying', () => {
+    const result = runHook(denied, {
+      CLAUDE_CONFIG_DIR: configDirNaming(BEADS_PROJECT),
+      CLAUDE_PLUGIN_ROOT: path.join(os.tmpdir(), 'pretend-plugin'),
+    });
+
+    expect(result.stdout).toContain('deny');
+  });
+
+  it('stands down as the project copy, so nothing is denied twice', () => {
+    const result = runHook(denied, {
+      CLAUDE_CONFIG_DIR: configDirNaming(BEADS_PROJECT),
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe('');
+  });
+
+  it('still denies where the plugin is active for another project', () => {
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), 'bg-other-'));
+
+    const result = runHook(denied, { CLAUDE_CONFIG_DIR: configDirNaming(other) });
+
+    expect(result.stdout).toContain('deny');
+  });
+});
