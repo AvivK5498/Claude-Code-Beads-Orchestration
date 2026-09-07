@@ -1,6 +1,6 @@
 {
   "name": "claude-protocol",
-  "version": "3.9.1",
+  "version": "3.9.2",
   "description": "Enforcement-first orchestration for Claude Code: beads task tracking, worktree isolation, hooks, and knowledge base",
   "license": "MIT",
   "repository": {

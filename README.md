@@ -58,6 +58,8 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
 
 ### Unreleased
 
+### v3.9.2 (2026-09-07)
+
 - **A new version is announced within a day, not a week** — the update check
   caches its answer so a session start never waits on the network, and the
   window was a week. Two releases went out on one afternoon and every cache
