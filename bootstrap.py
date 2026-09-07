@@ -1472,6 +1472,83 @@ def plugin_provided_relpaths() -> list:
     return rels
 
 
+def _claude_config_dir() -> Path:
+    """Where Claude Code keeps its own settings and plugin records."""
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude"))
+
+
+def _same_dir(a, b) -> bool:
+    """The same directory, however either side happened to spell it."""
+    if not a or not b:
+        return False
+    try:
+        resolved = [Path(str(p).rstrip("\\/")).resolve() for p in (a, b)]
+    except (OSError, ValueError):
+        return False
+    if os.name == "nt":
+        return str(resolved[0]).lower() == str(resolved[1]).lower()
+    return resolved[0] == resolved[1]
+
+
+def _plugin_switched_off(project_dir: Path) -> bool:
+    """True when settings anywhere switch our plugin off.
+
+    Installed is not enabled. Skipping the hooks for a plugin that never runs
+    would leave the project with nothing, so an explicit false outranks the
+    registry — while a missing entry stays missing, because a project-scope
+    install writes no enabledPlugins entry at all.
+    """
+    for settings in (_claude_config_dir() / "settings.json",
+                     project_dir / ".claude" / "settings.json",
+                     project_dir / ".claude" / "settings.local.json"):
+        try:
+            enabled = json.loads(settings.read_text(encoding="utf-8")).get("enabledPlugins")
+        except Exception:
+            continue  # Absent or unreadable settings say nothing either way.
+        if not isinstance(enabled, dict):
+            continue
+        for name, on in enabled.items():
+            if name.split("@")[0] == "claude-protocol" and on is False:
+                return True
+    return False
+
+
+def plugin_active_for(project_dir: Path) -> bool:
+    """True when the plugin is the one supplying hooks in this project.
+
+    Read from Claude Code's own record, plugins/installed_plugins.json: an
+    entry at user scope covers every project, one at project scope only the
+    path it names.
+
+    Every failure answers false and installs everything, deliberately. A
+    registry we half-understand is not grounds to strip someone's hooks, and
+    the cost of the opposite mistake is one hook they did not need.
+    """
+    if _plugin_switched_off(project_dir):
+        return False
+    try:
+        registry = json.loads(
+            (_claude_config_dir() / "plugins" / "installed_plugins.json")
+            .read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    plugins = registry.get("plugins") if isinstance(registry, dict) else None
+    if not isinstance(plugins, dict):
+        return False
+    for name, entries in plugins.items():
+        if name.split("@")[0] != "claude-protocol" or not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("scope") == "user":
+                return True
+            if (entry.get("scope") == "project"
+                    and _same_dir(entry.get("projectPath"), project_dir)):
+                return True
+    return False
+
+
 def hand_over_to_plugin(project_dir: Path, manifest: dict,
                         dry_run: bool = False) -> dict:
     """Remove the copies the plugin now provides, and unwire our hooks.
@@ -1939,6 +2016,16 @@ def bootstrap_project(
 
     if not install_beads(project_dir, dry_run, install_bd):
         return 1
+
+    # Both routes wire the same hooks, and Claude Code merges hooks from every
+    # source — installing ours on top of an active plugin makes each one fire
+    # twice. The plugin is already newer than whatever we would write, so it
+    # wins, and this run installs only what a plugin cannot carry.
+    if not project_only and plugin_active_for(project_dir):
+        project_only = True
+        print("\nClaude Protocol is installed here as a plugin, and it carries the")
+        print("hooks, agents and skill. Installing only what it cannot: beads,")
+        print("rules and CLAUDE.md.")
 
     # Installed as a plugin, Claude Code loads the hooks, agents and skill
     # itself; a copy of them in the project makes every hook fire twice.
