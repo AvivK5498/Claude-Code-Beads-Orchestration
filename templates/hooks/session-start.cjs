@@ -15,6 +15,7 @@ const {
   injectText, execCommand, getProjectDir, runHook,
   parseBdVersion, versionBelow, BD_MIN_VERSION,
   hasBeads, isPluginInstall, readOwnVersion, updateNotice,
+  leftoverProjectHooks,
 } = require('./hook-utils.cjs');
 
 runHook('session-start', () => {
@@ -34,6 +35,7 @@ runHook('session-start', () => {
   const output = [];
   const repoRoot = execCommand('git', ['-C', projectDir, 'rev-parse', '--show-toplevel']);
 
+  collectDoubleInstall(projectDir, output);
   collectOutdatedBd(output);
   collectUpdateNotice(output);
   collectDirtyWarning(repoRoot, output);
@@ -61,6 +63,27 @@ function collectOutdatedBd(output) {
   output.push(`WARNING: bd ${found} is older than ${BD_MIN_VERSION}, which the rules rely on`);
   output.push('   (bd memories, bd remember, bd worktree, bd prime).');
   output.push('   Update it: npm install -g @beads/bd@latest');
+  output.push('');
+}
+
+/**
+ * This project installed the hooks from npx, and the plugin supplies them too.
+ *
+ * The copy under .claude/hooks/ has already stood down — runHook sees the
+ * plugin is active and exits — so nothing fires twice. That silence is only
+ * explainable if someone says the leftovers are there, and only the plugin
+ * copy is in a position to: the project copy is the one keeping quiet.
+ */
+function collectDoubleInstall(projectDir, output) {
+  if (!isPluginInstall()) return;
+  const leftover = leftoverProjectHooks(projectDir);
+  if (leftover.length === 0) return;
+
+  output.push('Claude Protocol is installed twice here: as a plugin, and in');
+  output.push(`   .claude/settings.json from npx (${leftover.join(', ')}).`);
+  output.push('   The plugin is running them; the copies in the project stand');
+  output.push('   down, so nothing fires twice.');
+  output.push('   Run /claude-protocol:init to remove the leftovers.');
   output.push('');
 }
 

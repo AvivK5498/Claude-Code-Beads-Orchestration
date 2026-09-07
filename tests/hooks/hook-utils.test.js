@@ -823,3 +823,104 @@ describe('pluginActiveHere on a path spelled differently', () => {
     expect(withRegistry(registry, () => pluginActiveHere(link))).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// An npx install still wired up next to the plugin
+// ---------------------------------------------------------------------------
+// The project copy stands down on its own, silently. This is what makes the
+// silence explainable: the plugin says the leftovers are there and names the
+// command that removes them.
+
+const { leftoverProjectHooks } = require(utilsPath);
+
+function projectWithSettings(files) {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'hu-leftover-'));
+  fs.mkdirSync(path.join(project, '.claude'), { recursive: true });
+  for (const [name, contents] of Object.entries(files)) {
+    fs.writeFileSync(path.join(project, '.claude', name),
+                     typeof contents === 'string' ? contents : JSON.stringify(contents));
+  }
+  return project;
+}
+
+function wiring(...commands) {
+  return {
+    hooks: {
+      PreToolUse: [{ matcher: 'Bash', hooks: commands.map(c => ({ type: 'command', command: c })) }],
+    },
+  };
+}
+
+describe('leftoverProjectHooks', () => {
+  it('names a hook of ours wired in settings.json', () => {
+    const project = projectWithSettings({
+      'settings.json': wiring('node .claude/hooks/bash-guard.cjs'),
+    });
+
+    expect(leftoverProjectHooks(project)).toEqual(['bash-guard.cjs']);
+  });
+
+  it('names one wired in settings.local.json', () => {
+    const project = projectWithSettings({
+      'settings.local.json': wiring('node .claude/hooks/validate-completion.cjs'),
+    });
+
+    expect(leftoverProjectHooks(project)).toEqual(['validate-completion.cjs']);
+  });
+
+  it('names each hook once, however many places wire it', () => {
+    const project = projectWithSettings({
+      'settings.json': wiring('node .claude/hooks/session-start.cjs'),
+      'settings.local.json': wiring('node .claude/hooks/session-start.cjs'),
+    });
+
+    expect(leftoverProjectHooks(project)).toEqual(['session-start.cjs']);
+  });
+
+  it('is empty for settings that wire someone else’s script', () => {
+    const project = projectWithSettings({
+      'settings.json': wiring('node .claude/hooks/their-own-thing.cjs', 'bd prime'),
+    });
+
+    expect(leftoverProjectHooks(project)).toEqual([]);
+  });
+
+  it('is empty where there are no settings at all', () => {
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), 'hu-nosettings-'));
+
+    expect(leftoverProjectHooks(project)).toEqual([]);
+  });
+
+  it('is empty for settings it cannot read', () => {
+    const project = projectWithSettings({ 'settings.json': 'not json {{{' });
+
+    expect(leftoverProjectHooks(project)).toEqual([]);
+  });
+
+  it('is empty for settings with no hooks in them', () => {
+    const project = projectWithSettings({ 'settings.json': { permissions: {} } });
+
+    expect(leftoverProjectHooks(project)).toEqual([]);
+  });
+
+  it('finds the name inside the node -e wrapper the installer writes', () => {
+    const project = projectWithSettings({
+      'settings.json': wiring(
+        'node -e "const p=require(\'path\')..." bash-guard.cjs'),
+    });
+
+    expect(leftoverProjectHooks(project)).toEqual(['bash-guard.cjs']);
+  });
+});
+
+// A hook added to templates/hooks and forgotten here would go unnoticed in a
+// project that wires it: the leftovers would be reported as partly cleaned up.
+it('knows every hook the plugin ships', () => {
+  const shipped = fs.readdirSync(path.join(repoRoot, 'templates', 'hooks'))
+    .filter(name => name.endsWith('.cjs') && name !== 'hook-utils.cjs');
+  const project = projectWithSettings({
+    'settings.json': wiring(...shipped.map(name => `node .claude/hooks/${name}`)),
+  });
+
+  expect(leftoverProjectHooks(project).sort()).toEqual(shipped.sort());
+});

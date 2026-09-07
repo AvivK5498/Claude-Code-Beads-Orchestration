@@ -439,6 +439,47 @@ function pluginActiveHere(projectDir) {
   return !pluginSwitchedOff(here);
 }
 
+// Everything the plugin supplies. A project that wires any of these in its own
+// settings was installed from npx before the plugin arrived.
+const PLUGIN_PROVIDED_HOOKS = [
+  'bash-guard.cjs', 'validate-completion.cjs', 'session-start.cjs',
+  'update-check.cjs',
+];
+
+/**
+ * Which of our hooks a project still wires up itself, by file name.
+ *
+ * The project copy stands down on its own and says nothing, which is only
+ * explainable because the plugin can say the leftovers are there. Named after
+ * the file rather than the path: the installer writes the hook command as a
+ * `node -e` wrapper that passes the file name as an argument, so the path
+ * never appears whole.
+ */
+function leftoverProjectHooks(projectDir) {
+  const found = new Set();
+  for (const name of ('settings.json settings.local.json').split(' ')) {
+    let hooks;
+    try {
+      hooks = JSON.parse(
+        fs.readFileSync(path.join(projectDir, '.claude', name), 'utf8')).hooks;
+    } catch {
+      continue; // Absent or unreadable settings wire nothing we can see.
+    }
+    if (!hooks || typeof hooks !== 'object') continue;
+    for (const groups of Object.values(hooks)) {
+      for (const group of (Array.isArray(groups) ? groups : [])) {
+        for (const hook of (group && Array.isArray(group.hooks) ? group.hooks : [])) {
+          const command = String((hook && hook.command) || '');
+          for (const provided of PLUGIN_PROVIDED_HOOKS) {
+            if (command.includes(provided)) found.add(provided);
+          }
+        }
+      }
+    }
+  }
+  return PLUGIN_PROVIDED_HOOKS.filter(name => found.has(name));
+}
+
 /** The registry half of pluginActiveHere: installed, and covering this project. */
 function registrySaysActive(projectDir) {
   try {
@@ -669,6 +710,7 @@ module.exports = {
   getProjectDir,
   isPluginInstall,
   pluginActiveHere,
+  leftoverProjectHooks,
   hasBeads,
   readOwnVersion,
   updateNotice,
