@@ -237,6 +237,33 @@ class TestSetupGitignore:
         assert content.count(".worktrees/") == 1
         assert content.count("/issues.jsonl") == 1
 
+    def test_anchored_entries_are_the_same_entries(self, tmp_path, capsys):
+        """git reads '/x/', 'x/' and 'x' as covering the same path at the repo
+        root, so a project that anchored its entries with a slash used to get a
+        second copy of every one of them appended."""
+        gitignore = tmp_path / ".gitignore"
+        gitignore.write_text(
+            "\n".join(["/.worktrees/", "/.claude/.upgrades/", "issues.jsonl", ""])
+        )
+
+        setup_gitignore(_installer(tmp_path))
+
+        content = gitignore.read_text()
+        assert "# Beads orchestration" not in content
+        assert content.count(".worktrees") == 1
+        assert content.count(".claude/.upgrades") == 1
+        assert content.count("issues.jsonl") == 1
+
+    def test_a_comment_naming_an_entry_is_not_the_entry(self, tmp_path, capsys):
+        """Stripping slashes must not turn '# .worktrees/ is deliberate' into
+        the entry itself — that would leave the path unignored."""
+        gitignore = tmp_path / ".gitignore"
+        gitignore.write_text("# .worktrees/ left out on purpose" + "\n")
+
+        setup_gitignore(_installer(tmp_path))
+
+        assert ".worktrees/" in gitignore.read_text().splitlines()
+
     def test_adds_newline_if_missing(self, tmp_path, capsys):
         gitignore = tmp_path / ".gitignore"
         gitignore.write_text("node_modules/")  # no trailing newline
