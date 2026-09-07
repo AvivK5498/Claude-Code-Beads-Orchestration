@@ -36,6 +36,7 @@ from bootstrap import (
     _cleanup_empty_local_settings,
     _manifest_key,
     _has_existing_install,
+    plugin_active_for,
     copy_settings_and_claude_md,
     copy_rules_and_skills,
     marked_span,
@@ -3413,3 +3414,214 @@ class TestClaudeMdFollowsTheLanguage:
             (tmp_path / ".claude" / ".manifest.json").read_text(encoding="utf-8"))
 
         assert manifest["lang"] == "ru"
+
+
+
+# ============================================================================
+# Is the plugin already supplying the hooks here?
+# ============================================================================
+# npx and the plugin wire the same three hooks, and Claude Code merges hooks
+# from every source, so a project carrying both runs each one twice. When the
+# plugin is the active source, an npx install stops before the hooks.
+
+
+def _write_registry(config_dir, contents):
+    plugins = config_dir / "plugins"
+    plugins.mkdir(parents=True, exist_ok=True)
+    path = plugins / "installed_plugins.json"
+    path.write_text(contents if isinstance(contents, str) else json.dumps(contents),
+                    encoding="utf-8")
+    return path
+
+
+def _registry_with(*entries):
+    return {"version": 2, "plugins": {"claude-protocol@claude-protocol": list(entries)}}
+
+
+class TestPluginActiveFor:
+    @pytest.fixture(autouse=True)
+    def _config_dir(self, tmp_path, monkeypatch):
+        self.config = tmp_path / "config"
+        self.config.mkdir()
+        self.project = tmp_path / "project"
+        self.project.mkdir()
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(self.config))
+
+    def test_a_user_scope_install_covers_every_project(self):
+        _write_registry(self.config, _registry_with({"scope": "user"}))
+
+        assert plugin_active_for(self.project) is True
+
+    def test_a_project_scope_install_covers_the_project_it_names(self):
+        _write_registry(self.config, _registry_with(
+            {"scope": "project", "projectPath": str(self.project)}))
+
+        assert plugin_active_for(self.project) is True
+
+    def test_a_project_scope_install_covers_no_other_project(self, tmp_path):
+        other = tmp_path / "other"
+        other.mkdir()
+        _write_registry(self.config, _registry_with(
+            {"scope": "project", "projectPath": str(other)}))
+
+        assert plugin_active_for(self.project) is False
+
+    def test_a_trailing_separator_is_the_same_directory(self):
+        _write_registry(self.config, _registry_with(
+            {"scope": "project", "projectPath": str(self.project) + os.sep}))
+
+        assert plugin_active_for(self.project) is True
+
+    def test_other_plugins_are_not_this_one(self):
+        _write_registry(self.config, {"version": 2, "plugins": {
+            "feature-dev@somewhere": [{"scope": "user"}]}})
+
+        assert plugin_active_for(self.project) is False
+
+    def test_a_name_that_merely_starts_the_same_is_not_this_one(self):
+        _write_registry(self.config, {"version": 2, "plugins": {
+            "claude-protocol-extras@x": [{"scope": "user"}]}})
+
+        assert plugin_active_for(self.project) is False
+
+    def test_no_registry_at_all(self):
+        assert plugin_active_for(self.project) is False
+
+    def test_a_registry_that_is_not_json(self):
+        _write_registry(self.config, "not json {{{")
+
+        assert plugin_active_for(self.project) is False
+
+    @pytest.mark.parametrize("registry", [
+        {"version": 9},
+        {"plugins": "nope"},
+        {"version": 2, "plugins": {"claude-protocol@x": "nope"}},
+        {"version": 2, "plugins": {"claude-protocol@x": [None, 7]}},
+        _registry_with(),
+    ])
+    def test_a_shape_we_do_not_recognise(self, registry):
+        """Fail open, every time. An installer that strips someone's hooks
+        because a file it half-understands changed shape is worse than one that
+        installs a hook they did not need."""
+        _write_registry(self.config, registry)
+
+        assert plugin_active_for(self.project) is False
+
+
+class TestPluginSwitchedOff:
+    """Installed is not enabled. Standing down for a plugin that never runs
+    leaves the project with no hooks at all, so an explicit false outranks the
+    registry — while a missing entry stays a missing entry, because a
+    project-scope install writes none."""
+
+    @pytest.fixture(autouse=True)
+    def _config_dir(self, tmp_path, monkeypatch):
+        self.config = tmp_path / "config"
+        self.config.mkdir()
+        self.project = tmp_path / "project"
+        (self.project / ".claude").mkdir(parents=True)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(self.config))
+        _write_registry(self.config, _registry_with({"scope": "user"}))
+
+    def _settings(self, where, contents):
+        path = (self.config / "settings.json" if where == "user"
+                else self.project / ".claude" / where)
+        path.write_text(contents if isinstance(contents, str) else json.dumps(contents),
+                        encoding="utf-8")
+
+    OFF = {"enabledPlugins": {"claude-protocol@claude-protocol": False}}
+    ON = {"enabledPlugins": {"claude-protocol@claude-protocol": True}}
+
+    @pytest.mark.parametrize("where", ["user", "settings.json", "settings.local.json"])
+    def test_switched_off_anywhere_means_not_active(self, where):
+        self._settings(where, self.OFF)
+
+        assert plugin_active_for(self.project) is False
+
+    def test_switched_on_means_active(self):
+        self._settings("user", self.ON)
+
+        assert plugin_active_for(self.project) is True
+
+    def test_settings_saying_nothing_leave_the_registry_to_decide(self):
+        self._settings("user", {"permissions": {}})
+
+        assert plugin_active_for(self.project) is True
+
+    def test_settings_we_cannot_read_say_nothing(self):
+        self._settings("user", "not json {{{")
+
+        assert plugin_active_for(self.project) is True
+
+
+class TestFullInstallUnderAnActivePlugin:
+    """The half that makes the doubled state impossible to create through npx."""
+
+    @pytest.fixture(autouse=True)
+    def _no_beads_needed(self, monkeypatch):
+        monkeypatch.setattr(bootstrap, "install_beads", lambda *a, **k: True)
+        self.copied = []
+        for name in ("copy_hooks", "copy_agents"):
+            monkeypatch.setattr(bootstrap, name,
+                                lambda *a, _n=name, **k: self.copied.append(_n))
+
+    def _run(self, project_dir):
+        return bootstrap.bootstrap_project(
+            project_dir, "proj", with_rules=False, lang="en", force=False,
+            upgrade=False, dry_run=True,
+        )
+
+    def test_a_full_install_leaves_the_hooks_to_the_plugin(self, tmp_path, monkeypatch, capsys):
+        config = tmp_path / "config"
+        project = tmp_path / "project"
+        project.mkdir()
+        _write_registry(config, _registry_with(
+            {"scope": "project", "projectPath": str(project)}))
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+
+        assert self._run(project) == 0
+        assert self.copied == []
+        assert "plugin" in capsys.readouterr().out.lower()
+
+    def test_a_full_install_without_the_plugin_is_unchanged(self, tmp_path, monkeypatch):
+        config = tmp_path / "config"
+        config.mkdir()
+        project = tmp_path / "project"
+        project.mkdir()
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+
+        assert self._run(project) == 0
+        assert sorted(self.copied) == ["copy_agents", "copy_hooks"]
+
+
+class TestPathsSpelledDifferently:
+    """Two ways a recorded path can name the right directory in the wrong
+    words, and one way it can name nothing at all."""
+
+    @pytest.fixture(autouse=True)
+    def _config_dir(self, tmp_path, monkeypatch):
+        self.config = tmp_path / "config"
+        self.config.mkdir()
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(self.config))
+
+    def test_a_relative_path_matches_nothing(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        project = tmp_path / "somewhere"
+        project.mkdir()
+        _write_registry(self.config, _registry_with(
+            {"scope": "project", "projectPath": "./somewhere"}))
+
+        assert plugin_active_for(project) is False
+
+    def test_a_symlink_is_the_directory_it_points_at(self, tmp_path):
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "as-seen"
+        try:
+            link.symlink_to(real, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("no privilege to create a symlink here")
+        _write_registry(self.config, _registry_with(
+            {"scope": "project", "projectPath": str(real)}))
+
+        assert plugin_active_for(link) is True
