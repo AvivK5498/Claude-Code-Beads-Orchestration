@@ -15,6 +15,7 @@
 
 const { execFileSync } = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 // Module-level permission mode — set by readStdinJSON(), read by deny()/ask()
@@ -358,6 +359,149 @@ function isPluginInstall() {
   return Boolean(process.env.CLAUDE_PLUGIN_ROOT);
 }
 
+/** Claude Code's own record of which plugins are installed, and where. */
+function pluginRegistryPath() {
+  const dir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+  return path.join(dir, 'plugins', 'installed_plugins.json');
+}
+
+/** The same directory, however either side happened to spell it. */
+function samePath(a, b) {
+  const tidy = (p) => {
+    if (!p) return null;
+    const trimmed = String(p).replace(/[\\/]+$/, '');
+    // A relative path has no meaning here. Resolving it would use this
+    // process's working directory, which for a hook is wherever the last Bash
+    // call happened to leave it — an answer invented out of nothing.
+    if (!path.isAbsolute(trimmed)) return null;
+    let resolved = path.resolve(trimmed);
+    try {
+      // Follows symlinks and expands Windows short names, so /tmp and
+      // /private/tmp are one directory. Only possible for a path that exists;
+      // for one that does not, the text is the best there is.
+      resolved = fs.realpathSync.native(resolved);
+    } catch { /* not on disk — compare what was written */ }
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  };
+  const left = tidy(a);
+  return left !== null && left === tidy(b);
+}
+
+/**
+ * True when settings anywhere switch the plugin off.
+ *
+ * A plugin can be installed and disabled, and standing down for one that never
+ * runs leaves the project with no hooks and nothing said about it. An explicit
+ * false therefore outranks the registry. Absence is not a false: a
+ * project-scope install writes no enabledPlugins entry at all.
+ */
+function pluginSwitchedOff(projectDir) {
+  const dir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+  const files = [
+    path.join(dir, 'settings.json'),
+    path.join(projectDir, '.claude', 'settings.json'),
+    path.join(projectDir, '.claude', 'settings.local.json'),
+  ];
+  for (const file of files) {
+    let enabled;
+    try {
+      enabled = JSON.parse(fs.readFileSync(file, 'utf8')).enabledPlugins;
+    } catch {
+      continue; // Absent or unreadable settings say nothing either way.
+    }
+    if (!enabled || typeof enabled !== 'object') continue;
+    for (const [name, on] of Object.entries(enabled)) {
+      if (name.split('@')[0] === 'claude-protocol' && on === false) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * True when the registry says claude-protocol is the plugin supplying hooks
+ * here: installed at user scope, which covers every project, or at project
+ * scope naming this one.
+ *
+ * Both install routes wire the same three hooks and Claude Code merges hooks
+ * from every source, so a project carrying both fires each one twice. This is
+ * how the copy installed under a project knows to stand down.
+ *
+ * Missing, unreadable or a shape we do not recognise all answer false. A copy
+ * that stands down on a guess enforces nothing and says nothing about it,
+ * which is the worse of the two failures by far.
+ */
+function pluginActiveHere(projectDir) {
+  const here = projectDir || getProjectDir();
+  // The registry first, and the settings only if it says yes: this runs before
+  // every hook, and on the overwhelmingly common machine with no such plugin
+  // installed that is one missing file instead of four.
+  if (!registrySaysActive(here)) return false;
+  return !pluginSwitchedOff(here);
+}
+
+// Everything the plugin supplies. A project that wires any of these in its own
+// settings was installed from npx before the plugin arrived.
+const PLUGIN_PROVIDED_HOOKS = [
+  'bash-guard.cjs', 'validate-completion.cjs', 'session-start.cjs',
+  'update-check.cjs',
+];
+
+/**
+ * Which of our hooks a project still wires up itself, by file name.
+ *
+ * The project copy stands down on its own and says nothing, which is only
+ * explainable because the plugin can say the leftovers are there. Named after
+ * the file rather than the path: the installer writes the hook command as a
+ * `node -e` wrapper that passes the file name as an argument, so the path
+ * never appears whole.
+ */
+function leftoverProjectHooks(projectDir) {
+  const found = new Set();
+  for (const name of ('settings.json settings.local.json').split(' ')) {
+    let hooks;
+    try {
+      hooks = JSON.parse(
+        fs.readFileSync(path.join(projectDir, '.claude', name), 'utf8')).hooks;
+    } catch {
+      continue; // Absent or unreadable settings wire nothing we can see.
+    }
+    if (!hooks || typeof hooks !== 'object') continue;
+    for (const groups of Object.values(hooks)) {
+      for (const group of (Array.isArray(groups) ? groups : [])) {
+        for (const hook of (group && Array.isArray(group.hooks) ? group.hooks : [])) {
+          const command = String((hook && hook.command) || '');
+          for (const provided of PLUGIN_PROVIDED_HOOKS) {
+            if (command.includes(provided)) found.add(provided);
+          }
+        }
+      }
+    }
+  }
+  return PLUGIN_PROVIDED_HOOKS.filter(name => found.has(name));
+}
+
+/** The registry half of pluginActiveHere: installed, and covering this project. */
+function registrySaysActive(projectDir) {
+  try {
+    const registry = JSON.parse(fs.readFileSync(pluginRegistryPath(), 'utf8'));
+    const plugins = registry && registry.plugins;
+    if (!plugins || typeof plugins !== 'object') return false;
+    for (const [name, entries] of Object.entries(plugins)) {
+      if (name.split('@')[0] !== 'claude-protocol') continue;
+      if (!Array.isArray(entries)) continue;
+      for (const entry of entries) {
+        if (!entry || typeof entry !== 'object') continue;
+        if (entry.scope === 'user') return true;
+        if (entry.scope === 'project'
+            && samePath(entry.projectPath, projectDir)) return true;
+      }
+    }
+  } catch {
+    // No registry, or one we cannot read. Neither is evidence of a plugin.
+  }
+  return false;
+}
+
 /**
  * True when the project being worked on tracks its work in beads.
  *
@@ -529,6 +673,13 @@ function logError(hookName, err) {
  *   runHook('hook-name', () => { ... });
  */
 function runHook(hookName, fn) {
+  // Both install routes wire the same hooks, and Claude Code merges hooks from
+  // every source, so a project carrying both runs each one twice — a doubled
+  // `bd prime` alone is ~19KB of context per session. Where the plugin is
+  // active it is the one source; the copy installed under the project stands
+  // down. Silently: the plugin's session-start says the leftovers are there
+  // and what removes them, and one voice saying it is enough.
+  if (!isPluginInstall() && pluginActiveHere()) process.exit(0);
   try {
     fn();
   } catch (err) {
@@ -558,6 +709,8 @@ module.exports = {
   getCurrentBranch,
   getProjectDir,
   isPluginInstall,
+  pluginActiveHere,
+  leftoverProjectHooks,
   hasBeads,
   readOwnVersion,
   updateNotice,

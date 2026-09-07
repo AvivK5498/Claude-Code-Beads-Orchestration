@@ -58,6 +58,26 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
 
 ### Unreleased
 
+### v3.9.0 (2026-09-07)
+
+- **One source supplies the hooks, whichever order you install in** — the
+  plugin and `npx claude-protocol init` wire the same three hooks, and Claude
+  Code merges hooks from every source, so a project carrying both ran each one
+  twice. Now the copy installed in a project stands down while the plugin is
+  active, `npx claude-protocol init` installs only the project half when the
+  plugin is already there, and the session-start hook says the leftovers exist
+  and names the command that removes them. All three read Claude Code's own
+  plugin registry; a registry that is missing, unreadable or shaped
+  unfamiliarly, or a plugin switched off in settings, installs and runs exactly
+  as before.
+
+- **The plugin loads without a duplicate-hooks error** — `plugin.json` named
+  `hooks/hooks.json`, the one file Claude Code loads by itself, so every
+  startup reported `Duplicate hooks file detected`. The manifest field is for
+  hook files *besides* the standard one. The line is gone and a test keeps it
+  from coming back; the hooks themselves were never affected, because the
+  automatic load is the one that won.
+
 ### v3.8.1 (2026-09-05)
 
 - **The release build runs on the Node 24 action runtime** — `checkout`,
@@ -307,12 +327,16 @@ stays at the version you installed until you turn it on in `/plugin` →
 on or off, the session-start hook tells you once a week when a newer version is
 out.
 
-**Already installed with `npx`?** Run `/claude-protocol:init` after enabling the
-plugin. Hooks merge from every source, so the copies in `.claude/hooks/` would
-fire alongside the plugin's and every check would run twice. The command removes
-the copies it installed, unwires them from `settings.json`, and lists what it
-took; copies of everything removed go to `.claude/.upgrades/`. Files you added
-yourself are left alone.
+**Already installed with `npx`?** Nothing runs twice. Hooks merge from every
+source, so the copies in `.claude/hooks/` would fire alongside the plugin's —
+instead they stand down while the plugin is the active one, and the
+session-start hook says the leftovers are there. `/claude-protocol:init`
+removes them: it takes out the copies it installed, unwires them from
+`settings.json`, and lists what it took; copies of everything removed go to
+`.claude/.upgrades/`. Files you added yourself are left alone. Running `npx
+claude-protocol init` in a project that has the plugin installs only the
+project half, for the same reason — whichever order you install them in, one
+source ends up supplying the hooks.
 
 ### Options
 
