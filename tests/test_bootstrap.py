@@ -3577,3 +3577,36 @@ class TestFullInstallUnderAnActivePlugin:
 
         assert self._run(project) == 0
         assert sorted(self.copied) == ["copy_agents", "copy_hooks"]
+
+
+class TestPathsSpelledDifferently:
+    """Two ways a recorded path can name the right directory in the wrong
+    words, and one way it can name nothing at all."""
+
+    @pytest.fixture(autouse=True)
+    def _config_dir(self, tmp_path, monkeypatch):
+        self.config = tmp_path / "config"
+        self.config.mkdir()
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(self.config))
+
+    def test_a_relative_path_matches_nothing(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        project = tmp_path / "somewhere"
+        project.mkdir()
+        _write_registry(self.config, _registry_with(
+            {"scope": "project", "projectPath": "./somewhere"}))
+
+        assert plugin_active_for(project) is False
+
+    def test_a_symlink_is_the_directory_it_points_at(self, tmp_path):
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "as-seen"
+        try:
+            link.symlink_to(real, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("no privilege to create a symlink here")
+        _write_registry(self.config, _registry_with(
+            {"scope": "project", "projectPath": str(real)}))
+
+        assert plugin_active_for(link) is True

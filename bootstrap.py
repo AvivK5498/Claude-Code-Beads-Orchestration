@@ -1478,13 +1478,24 @@ def _claude_config_dir() -> Path:
 
 
 def _same_dir(a, b) -> bool:
-    """The same directory, however either side happened to spell it."""
-    if not a or not b:
-        return False
-    try:
-        resolved = [Path(str(p).rstrip("\\/")).resolve() for p in (a, b)]
-    except (OSError, ValueError):
-        return False
+    """The same directory, however either side happened to spell it.
+
+    resolve() follows symlinks and expands Windows short names, so /tmp and
+    /private/tmp are one directory. A relative path matches nothing at all:
+    resolving it would use whatever directory this process was started in,
+    which is not what the registry meant to record.
+    """
+    resolved = []
+    for value in (a, b):
+        if not value:
+            return False
+        candidate = Path(str(value).rstrip("\\/"))
+        if not candidate.is_absolute():
+            return False
+        try:
+            resolved.append(candidate.resolve())
+        except (OSError, ValueError):
+            return False
     if os.name == "nt":
         return str(resolved[0]).lower() == str(resolved[1]).lower()
     return resolved[0] == resolved[1]
@@ -1524,8 +1535,15 @@ def plugin_active_for(project_dir: Path) -> bool:
     registry we half-understand is not grounds to strip someone's hooks, and
     the cost of the opposite mistake is one hook they did not need.
     """
-    if _plugin_switched_off(project_dir):
+    if not _registry_says_active(project_dir):
         return False
+    return not _plugin_switched_off(project_dir)
+
+
+def _registry_says_active(project_dir: Path) -> bool:
+    """Installed, and covering this project. Asked before the settings files
+    because that is the cheap question: on a machine with no such plugin it is
+    one missing file instead of four."""
     try:
         registry = json.loads(
             (_claude_config_dir() / "plugins" / "installed_plugins.json")
