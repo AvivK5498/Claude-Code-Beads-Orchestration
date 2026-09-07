@@ -58,8 +58,6 @@ v3 is a ground-up rewrite. Different architecture, different philosophy. See [de
 
 ### Unreleased
 
-### v3.8.2 (2026-09-07)
-
 - **The plugin loads without a duplicate-hooks error** — `plugin.json` named
   `hooks/hooks.json`, the one file Claude Code loads by itself, so every
   startup reported `Duplicate hooks file detected`. The manifest field is for

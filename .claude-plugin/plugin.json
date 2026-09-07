@@ -1,7 +1,7 @@
 {
   "name": "claude-protocol",
   "displayName": "Claude Protocol",
-  "version": "3.8.2",
+  "version": "3.8.1",
   "description": "Enforcement-first orchestration for Claude Code: beads task tracking, worktree isolation, cross-platform hooks and trigger-based rules.",
   "author": {
     "name": "weselow",
