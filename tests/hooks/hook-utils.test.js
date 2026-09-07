@@ -570,3 +570,357 @@ describe('updateNotice', () => {
     expect(lines).toContain('off by default');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Is the plugin the one supplying these hooks in this project?
+// ---------------------------------------------------------------------------
+// Both routes wire the same three hooks, and Claude Code merges hooks from
+// every source, so a project carrying both fires each one twice. The answer
+// comes from Claude Code's own plugin registry, and any registry we cannot
+// read has to answer "no" — a copy that stands down on a guess is a copy that
+// stops enforcing anything.
+
+const { pluginActiveHere } = require(utilsPath);
+
+/** A throwaway CLAUDE_CONFIG_DIR holding the given registry text. */
+function withRegistry(contents, fn) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hu-registry-'));
+  if (contents !== undefined) {
+    fs.mkdirSync(path.join(dir, 'plugins'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'plugins', 'installed_plugins.json'),
+      typeof contents === 'string' ? contents : JSON.stringify(contents),
+    );
+  }
+  const saved = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = dir;
+  try {
+    return fn();
+  } finally {
+    if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = saved;
+  }
+}
+
+function registryWith(...entries) {
+  return { version: 2, plugins: { 'claude-protocol@claude-protocol': entries } };
+}
+
+describe('pluginActiveHere', () => {
+  const project = path.join(os.tmpdir(), 'hu-active-project');
+  const elsewhere = path.join(os.tmpdir(), 'hu-other-project');
+
+  it('is true for every project when the plugin is installed at user scope', () => {
+    const registry = registryWith({ scope: 'user', version: '3.8.1' });
+
+    expect(withRegistry(registry, () => pluginActiveHere(project))).toBe(true);
+  });
+
+  it('is true for the project a project-scope install names', () => {
+    const registry = registryWith({ scope: 'project', projectPath: project });
+
+    expect(withRegistry(registry, () => pluginActiveHere(project))).toBe(true);
+  });
+
+  it('is false for a project a project-scope install does not name', () => {
+    const registry = registryWith({ scope: 'project', projectPath: elsewhere });
+
+    expect(withRegistry(registry, () => pluginActiveHere(project))).toBe(false);
+  });
+
+  it('ignores a trailing separator on the recorded path', () => {
+    const registry = registryWith({ scope: 'project', projectPath: project + path.sep });
+
+    expect(withRegistry(registry, () => pluginActiveHere(project))).toBe(true);
+  });
+
+  it('is false when the registry holds other plugins only', () => {
+    const registry = { version: 2, plugins: { 'feature-dev@somewhere': [{ scope: 'user' }] } };
+
+    expect(withRegistry(registry, () => pluginActiveHere(project))).toBe(false);
+  });
+
+  it('is false when a lookalike name merely starts the same', () => {
+    const registry = { version: 2, plugins: { 'claude-protocol-extras@x': [{ scope: 'user' }] } };
+
+    expect(withRegistry(registry, () => pluginActiveHere(project))).toBe(false);
+  });
+
+  it('is false when the registry is not there', () => {
+    expect(withRegistry(undefined, () => pluginActiveHere(project))).toBe(false);
+  });
+
+  it('is false when the registry is not JSON', () => {
+    expect(withRegistry('not json {{{', () => pluginActiveHere(project))).toBe(false);
+  });
+
+  it('is false when the registry has a shape we do not know', () => {
+    expect(withRegistry({ version: 9 }, () => pluginActiveHere(project))).toBe(false);
+    expect(withRegistry({ plugins: 'nope' }, () => pluginActiveHere(project))).toBe(false);
+    expect(withRegistry(registryWith(), () => pluginActiveHere(project))).toBe(false);
+    expect(withRegistry({ version: 2, plugins: { 'claude-protocol@x': 'nope' } },
+                        () => pluginActiveHere(project))).toBe(false);
+  });
+
+  it('falls back to the project it is asked about', () => {
+    const registry = registryWith({ scope: 'project', projectPath: project });
+
+    expect(withRegistry(registry, () => withEnv(project, () => pluginActiveHere())))
+      .toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// One source at a time: the project copy stands down under an active plugin
+// ---------------------------------------------------------------------------
+// Every hook the plugin ships goes through runHook, so the stand-down lives
+// there once instead of at the top of each of them.
+
+/** Write a registry naming `project` at project scope, return its config dir. */
+function registryDirFor(project) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hu-standdown-'));
+  fs.mkdirSync(path.join(dir, 'plugins'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'plugins', 'installed_plugins.json'),
+                   JSON.stringify(registryWith({ scope: 'project', projectPath: project })));
+  return dir;
+}
+
+/** Run runHook in its own process; returns what the body managed to print. */
+function runHookInSubprocess(env) {
+  const script = `const u=require(${JSON.stringify(utilsPath)});`
+    + `u.runHook('probe', () => process.stdout.write('RAN'));`;
+  return spawnSync(process.execPath, ['-e', script], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      CLAUDE_PLUGIN_ROOT: '',
+      CLAUDE_CONFIG_DIR: '',
+      ...env,
+    },
+  });
+}
+
+describe('runHook under an active plugin', () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'hu-sd-project-'));
+
+  it('does not run the body of a project copy', () => {
+    const result = runHookInSubprocess({
+      CLAUDE_PROJECT_DIR: project,
+      CLAUDE_CONFIG_DIR: registryDirFor(project),
+    });
+
+    expect(result.stdout).toBe('');
+    expect(result.status).toBe(0);
+  });
+
+  it('runs the body of the plugin copy, which is the one doing the work', () => {
+    const result = runHookInSubprocess({
+      CLAUDE_PROJECT_DIR: project,
+      CLAUDE_CONFIG_DIR: registryDirFor(project),
+      CLAUDE_PLUGIN_ROOT: path.join(os.tmpdir(), 'pretend-plugin'),
+    });
+
+    expect(result.stdout).toBe('RAN');
+  });
+
+  it('runs the body when no plugin is installed at all', () => {
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'hu-sd-empty-'));
+    const result = runHookInSubprocess({
+      CLAUDE_PROJECT_DIR: project,
+      CLAUDE_CONFIG_DIR: empty,
+    });
+
+    expect(result.stdout).toBe('RAN');
+  });
+
+  it('runs the body when the plugin is active for a different project', () => {
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), 'hu-sd-other-'));
+    const result = runHookInSubprocess({
+      CLAUDE_PROJECT_DIR: project,
+      CLAUDE_CONFIG_DIR: registryDirFor(other),
+    });
+
+    expect(result.stdout).toBe('RAN');
+  });
+});
+
+// A plugin can be installed and switched off. Standing down for one that never
+// runs leaves the project with no hooks at all and nothing said about it, so an
+// explicit false anywhere outranks the registry. Absence is not a false: a
+// project-scope install writes no enabledPlugins entry at all.
+describe('pluginActiveHere with the plugin switched off', () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'hu-off-project-'));
+
+  function withSettings(where, contents, fn) {
+    const registry = registryWith({ scope: 'user' });
+    return withRegistry(registry, () => {
+      const target = where === 'user'
+        ? path.join(process.env.CLAUDE_CONFIG_DIR, 'settings.json')
+        : path.join(project, '.claude', where);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, typeof contents === 'string'
+        ? contents : JSON.stringify(contents));
+      try {
+        return fn();
+      } finally {
+        fs.rmSync(target, { force: true });
+      }
+    });
+  }
+
+  const off = { enabledPlugins: { 'claude-protocol@claude-protocol': false } };
+  const on = { enabledPlugins: { 'claude-protocol@claude-protocol': true } };
+
+  it('is false when user settings switch it off', () => {
+    expect(withSettings('user', off, () => pluginActiveHere(project))).toBe(false);
+  });
+
+  it('is false when the project switches it off', () => {
+    expect(withSettings('settings.json', off, () => pluginActiveHere(project)))
+      .toBe(false);
+  });
+
+  it('is false when the local project settings switch it off', () => {
+    expect(withSettings('settings.local.json', off, () => pluginActiveHere(project)))
+      .toBe(false);
+  });
+
+  it('is true when settings switch it on', () => {
+    expect(withSettings('user', on, () => pluginActiveHere(project))).toBe(true);
+  });
+
+  it('is true when settings say nothing about it', () => {
+    expect(withSettings('user', { permissions: {} }, () => pluginActiveHere(project)))
+      .toBe(true);
+  });
+
+  it('ignores settings it cannot read', () => {
+    expect(withSettings('user', 'not json {{{', () => pluginActiveHere(project)))
+      .toBe(true);
+  });
+});
+
+// Two ways a recorded path can name the right directory in the wrong words,
+// and one way it can name nothing at all.
+describe('pluginActiveHere on a path spelled differently', () => {
+  it('is false for a relative path, which resolves against nothing knowable', () => {
+    const registry = registryWith({ scope: 'project', projectPath: './somewhere' });
+
+    expect(withRegistry(registry, () => pluginActiveHere(path.resolve('./somewhere'))))
+      .toBe(false);
+  });
+
+  it('sees through a symlink to the same directory', () => {
+    const real = fs.mkdtempSync(path.join(os.tmpdir(), 'hu-real-'));
+    const link = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'hu-link-')), 'as-seen');
+    try {
+      fs.symlinkSync(real, link, 'junction');
+    } catch {
+      return; // Windows without the privilege to make one. Nothing to prove here.
+    }
+    const registry = registryWith({ scope: 'project', projectPath: real });
+
+    expect(withRegistry(registry, () => pluginActiveHere(link))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// An npx install still wired up next to the plugin
+// ---------------------------------------------------------------------------
+// The project copy stands down on its own, silently. This is what makes the
+// silence explainable: the plugin says the leftovers are there and names the
+// command that removes them.
+
+const { leftoverProjectHooks } = require(utilsPath);
+
+function projectWithSettings(files) {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'hu-leftover-'));
+  fs.mkdirSync(path.join(project, '.claude'), { recursive: true });
+  for (const [name, contents] of Object.entries(files)) {
+    fs.writeFileSync(path.join(project, '.claude', name),
+                     typeof contents === 'string' ? contents : JSON.stringify(contents));
+  }
+  return project;
+}
+
+function wiring(...commands) {
+  return {
+    hooks: {
+      PreToolUse: [{ matcher: 'Bash', hooks: commands.map(c => ({ type: 'command', command: c })) }],
+    },
+  };
+}
+
+describe('leftoverProjectHooks', () => {
+  it('names a hook of ours wired in settings.json', () => {
+    const project = projectWithSettings({
+      'settings.json': wiring('node .claude/hooks/bash-guard.cjs'),
+    });
+
+    expect(leftoverProjectHooks(project)).toEqual(['bash-guard.cjs']);
+  });
+
+  it('names one wired in settings.local.json', () => {
+    const project = projectWithSettings({
+      'settings.local.json': wiring('node .claude/hooks/validate-completion.cjs'),
+    });
+
+    expect(leftoverProjectHooks(project)).toEqual(['validate-completion.cjs']);
+  });
+
+  it('names each hook once, however many places wire it', () => {
+    const project = projectWithSettings({
+      'settings.json': wiring('node .claude/hooks/session-start.cjs'),
+      'settings.local.json': wiring('node .claude/hooks/session-start.cjs'),
+    });
+
+    expect(leftoverProjectHooks(project)).toEqual(['session-start.cjs']);
+  });
+
+  it('is empty for settings that wire someone else’s script', () => {
+    const project = projectWithSettings({
+      'settings.json': wiring('node .claude/hooks/their-own-thing.cjs', 'bd prime'),
+    });
+
+    expect(leftoverProjectHooks(project)).toEqual([]);
+  });
+
+  it('is empty where there are no settings at all', () => {
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), 'hu-nosettings-'));
+
+    expect(leftoverProjectHooks(project)).toEqual([]);
+  });
+
+  it('is empty for settings it cannot read', () => {
+    const project = projectWithSettings({ 'settings.json': 'not json {{{' });
+
+    expect(leftoverProjectHooks(project)).toEqual([]);
+  });
+
+  it('is empty for settings with no hooks in them', () => {
+    const project = projectWithSettings({ 'settings.json': { permissions: {} } });
+
+    expect(leftoverProjectHooks(project)).toEqual([]);
+  });
+
+  it('finds the name inside the node -e wrapper the installer writes', () => {
+    const project = projectWithSettings({
+      'settings.json': wiring(
+        'node -e "const p=require(\'path\')..." bash-guard.cjs'),
+    });
+
+    expect(leftoverProjectHooks(project)).toEqual(['bash-guard.cjs']);
+  });
+});
+
+// A hook added to templates/hooks and forgotten here would go unnoticed in a
+// project that wires it: the leftovers would be reported as partly cleaned up.
+it('knows every hook the plugin ships', () => {
+  const shipped = fs.readdirSync(path.join(repoRoot, 'templates', 'hooks'))
+    .filter(name => name.endsWith('.cjs') && name !== 'hook-utils.cjs');
+  const project = projectWithSettings({
+    'settings.json': wiring(...shipped.map(name => `node .claude/hooks/${name}`)),
+  });
+
+  expect(leftoverProjectHooks(project).sort()).toEqual(shipped.sort());
+});
